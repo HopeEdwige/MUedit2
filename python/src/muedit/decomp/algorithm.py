@@ -225,16 +225,19 @@ def compute_silhouette(x, w, fsamp):
 
 def extract_muap_segments(mu_pulses, length_radius, y):
     """Extract waveform snippets around pulse indices."""
-    valid_mask = (mu_pulses >= length_radius) & (mu_pulses < len(y) - length_radius)
-    valid_pulses = mu_pulses[valid_mask]
-
+    pulses = np.asarray(mu_pulses, dtype=int).reshape(-1)
     window_size = 2 * length_radius + 1
-    muaps = np.zeros((len(valid_pulses), window_size))
+    if pulses.size == 0:
+        return np.zeros((0, window_size))
 
-    for k, p in enumerate(valid_pulses):
-        muaps[k, :] = y[p - length_radius : p + length_radius + 1]
+    valid_mask = (pulses >= length_radius) & (pulses < len(y) - length_radius)
+    valid_pulses = pulses[valid_mask]
+    if valid_pulses.size == 0:
+        return np.zeros((0, window_size))
 
-    return muaps
+    offsets = np.arange(-length_radius, length_radius + 1, dtype=int)
+    idx = valid_pulses[:, None] + offsets[None, :]
+    return np.asarray(y, dtype=float)[idx]
 
 
 def subtract_mu_waveforms(x, spikes, fsamp, win):

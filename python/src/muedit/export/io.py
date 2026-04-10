@@ -85,6 +85,8 @@ def load_bids_emg_grid(
     bids_root: Path,
     entity_label: str,
     grid_index: int,
+    read_start: int = 0,
+    read_n: int | None = None,
 ) -> tuple[np.ndarray, float, np.ndarray]:
     """Load EMG samples, sampling rate, and bad-mask for a single BIDS grid."""
     emg_path = resolve_bids_emg_path(bids_root, entity_label)
@@ -97,7 +99,7 @@ def load_bids_emg_grid(
         fsamp = float(reader.getSampleFrequency(selection.channel_indices[0]))
         signals = []
         for ch_idx in selection.channel_indices:
-            signals.append(reader.readSignal(ch_idx))
+            signals.append(reader.readSignal(ch_idx, start=read_start, n=read_n))
         data = np.vstack(signals)
     finally:
         reader.close()
