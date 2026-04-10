@@ -444,6 +444,10 @@ def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
     mu_index = as_int(payload.get("mu_index"), "mu_index", default=0)
     if mu_index < 0 or mu_index >= len(distimes):
         raise HTTPException(status_code=400, detail="mu_index out of range")
+    mu_grid_index = _normalize_mu_grid_index(payload.get("mu_grid_index"), len(distimes))
+    peeloff_win = as_float(payload.get("peel_off_win"), "peel_off_win", default=0.025)
+    if peeloff_win <= 0:
+        peeloff_win = 0.025
 
     view_start = as_int(payload.get("view_start"), "view_start", default=0)
     view_end = as_int(payload.get("view_end"), "view_end", default=0)
@@ -458,7 +462,7 @@ def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
     if bids_root:
         try:
             emg, fsamp, emg_mask = _load_bids_grid(
-                Path(bids_root), str(entity_label), grid_index
+                Path(bids_root), str(entity_label), grid_index, view_start, view_end
             )
         except (ValueError, FileNotFoundError):
             emg, fsamp, emg_mask = None, None, None
@@ -516,6 +520,7 @@ def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
                 elif cell_arr.size == n_ch:
                     emg_mask = np.asarray(cell_arr != 0, dtype=int)
 
+    bids_emg_offset = view_start if bids_root and emg is not None else 0
     pt, updated = update_motor_unit_filter_window(
         emg,
         emg_mask,
@@ -524,6 +529,13 @@ def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
         view_start,
         view_end,
         nbextchan=nbextchan,
+        peeloff_spike_times=[
+            distimes[i]
+            for i in range(len(distimes))
+            if i != mu_index and mu_grid_index[i] == grid_index
+        ],
+        peeloff_win=peeloff_win,
+        emg_offset=bids_emg_offset,
     )
 
     pulse_train = payload.get("pulse_train")

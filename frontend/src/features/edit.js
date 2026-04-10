@@ -357,6 +357,7 @@ export async function requestFilterUpdate(deps, mode) {
           grid_index: gridIndex,
           mu_index: muIdx,
           distimes: state.edit.distimes,
+          mu_grid_index: state.edit.muGridIndex || [],
           pulse_train: pulse,
           view_start: start,
           view_end: end,

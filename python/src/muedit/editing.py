@@ -10,13 +10,13 @@ from __future__ import annotations
 from typing import TypeAlias
 
 import numpy as np
-from scipy.linalg import pinv
 from scipy.signal import find_peaks
 
 from muedit.decomp.algorithm import (
     extend_signal,
     pca_extended_signal,
     simple_kmeans,
+    subtract_mu_waveforms,
     whiten_extended_signal,
 )
 from muedit.signal.filters import bandpass_signals
@@ -52,23 +52,24 @@ def _recompute_spikes_in_window(
     start: int,
     end: int,
     nbextchan: int,
+    peeloff_spike_times: list[SpikeTimes] | None = None,
+    peeloff_win: float = 0.025,
+    emg_offset: int = 0,
 ) -> FilterUpdateResult:
     """Recompute motor-unit pulse train and spikes within a visible time window."""
     if emg.size == 0 or start >= end:
         return None, spike_times
 
     edge = int(round(0.1 * fsamp))
-    idx = np.arange(start, end)
-    if idx.size <= 2 * edge:
+    win_len = end - start
+    if win_len <= 2 * edge:
         return None, spike_times
 
-    window_emg = emg[:, start:end]
+    window_emg = emg[:, start - emg_offset : end - emg_offset]
     window_emg = bandpass_signals(window_emg, fsamp)
 
-    valid_idx = idx[edge:-edge]
-    spikes1 = np.intersect1d(
-        valid_idx, np.array(spike_times, dtype=int), assume_unique=False
-    )
+    spikes_arr = np.asarray(spike_times, dtype=int)
+    spikes1 = spikes_arr[(spikes_arr >= start + edge) & (spikes_arr < end - edge)]
     if spikes1.size == 0:
         return None, spike_times
 
@@ -76,16 +77,24 @@ def _recompute_spikes_in_window(
     ex_factor = int(round(nbextchan / max(window_emg.shape[0], 1)))
     ex_factor = max(1, ex_factor)
     e_sig = extend_signal(window_emg, ex_factor)
-    re_sig = e_sig @ e_sig.T / e_sig.shape[1]
-    i_re_sig = pinv(re_sig)
     eigenvectors, eigenvalues_diag = pca_extended_signal(e_sig)
-    w_sig, _, dewhite = whiten_extended_signal(e_sig, eigenvectors, eigenvalues_diag)
+    w_sig, _, _ = whiten_extended_signal(e_sig, eigenvectors, eigenvalues_diag)
+
+    # if peeloff_spike_times:
+    #     for other_spikes in peeloff_spike_times:
+    #         local_spikes = np.asarray(other_spikes, dtype=int) - start
+    #         local_spikes = local_spikes[
+    #             (local_spikes >= edge) & (local_spikes < (win_len - edge))
+    #         ]
+    #         if local_spikes.size > 0:
+    #             w_sig = subtract_mu_waveforms(w_sig, local_spikes, fsamp, peeloff_win)
+
     mu_filters = np.sum(w_sig[:, spikes2], axis=1)
     norm = float(np.linalg.norm(mu_filters))
     if norm > 0.0:
         mu_filters = mu_filters / norm
 
-    pt = (dewhite @ mu_filters).T @ i_re_sig @ e_sig
+    pt = mu_filters.T @ w_sig
     pt = pt[: window_emg.shape[1]]
     pt[:edge] = 0
     pt[-edge:] = 0
@@ -118,17 +127,24 @@ def update_motor_unit_filter_window(
     start: int,
     end: int,
     nbextchan: int = 1000,
+    peeloff_spike_times: list[SpikeTimes] | None = None,
+    peeloff_win: float = 0.025,
+    emg_offset: int = 0,
 ) -> FilterUpdateResult:
     """Update a motor-unit pulse train and spikes inside a time window.
 
     Args:
-        emg: Full EMG matrix with shape ``(n_channels, n_samples)``.
+        emg: EMG matrix with shape ``(n_channels, n_samples)``. May cover only
+            the view window when loaded via partial reads; in that case pass
+            ``emg_offset=view_start`` so sample indices are mapped correctly.
         emg_mask: Per-channel mask where ``1`` indicates a discarded channel.
         spike_times: Existing discharge times for one motor unit.
         fsamp: Sampling frequency in Hz.
-        start: Window start sample (inclusive).
-        end: Window end sample (exclusive).
+        start: Window start sample (inclusive), in absolute recording coordinates.
+        end: Window end sample (exclusive), in absolute recording coordinates.
         nbextchan: Number of extended channels target for decomposition filtering.
+        emg_offset: First sample index represented by ``emg[:,0]``. Zero when
+            the full recording is passed; equal to ``view_start`` for partial reads.
 
     Returns:
         Tuple ``(pulse_train_segment, updated_spike_times)`` where
@@ -142,6 +158,9 @@ def update_motor_unit_filter_window(
         start,
         end,
         nbextchan=nbextchan,
+        peeloff_spike_times=peeloff_spike_times,
+        peeloff_win=peeloff_win,
+        emg_offset=emg_offset,
     )
     return pt, updated
 

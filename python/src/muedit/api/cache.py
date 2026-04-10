@@ -187,10 +187,17 @@ def _moving_average_ms(series: np.ndarray, fsamp: float, window_ms: float) -> np
 
 
 def _load_bids_grid(
-    bids_root: Path, entity_label: str, grid_index: int
+    bids_root: Path,
+    entity_label: str,
+    grid_index: int,
+    view_start: int = 0,
+    view_end: int | None = None,
 ) -> tuple[np.ndarray, float, np.ndarray]:
-    """Load BIDS EMG grid directly from disk (no caching — always reads fresh to avoid stale data)."""
-    emg, fsamp, emg_mask = load_bids_emg_grid(bids_root, entity_label, grid_index)
+    """Load BIDS EMG grid for a specific sample window to avoid reading the full recording."""
+    read_n = (view_end - view_start) if view_end is not None and view_end > view_start else None
+    emg, fsamp, emg_mask = load_bids_emg_grid(
+        bids_root, entity_label, grid_index, read_start=view_start, read_n=read_n
+    )
     return emg.copy(), float(fsamp), np.asarray(emg_mask, dtype=int).copy()
 
 

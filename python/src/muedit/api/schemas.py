@@ -57,10 +57,12 @@ class EditFilterPayload(BaseModel):
     grid_index: int = 0
     mu_index: int = 0
     distimes: list[list[int]]
+    mu_grid_index: list[int] | None = None
     pulse_train: list[float] | None = None
     view_start: int = 0
     view_end: int = 0
     nbextchan: int = 1000
+    peel_off_win: float = 0.025
 
 
 class EditRoiPayload(BaseModel):
