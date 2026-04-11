@@ -116,7 +116,7 @@ def decompose_step(
                     if w_final_norm > 0:
                         w_final = w_final / w_final_norm
                     mu_filters[:, j] = w_final
-                    basis[:, j] = w
+                    basis[:, j] = w_final
                     cov_scores[j] = cov_final
                     _, _, sil_val = compute_silhouette(x, w_final, prep.fsamp)
                     sil_scores[j] = sil_val

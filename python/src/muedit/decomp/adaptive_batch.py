@@ -20,7 +20,7 @@ def _compute_calibration_stats(
     Returns (ipts_calib, spikes_calib, base_centr, spikes_centr) used to
     initialise the AdaptDecomp model for subsequent batches.
     """
-    from muedit.decomp.algorithm import simple_kmeans
+    from scipy.cluster.vq import kmeans2
 
     n_mu = mu_filters.shape[1]
     ipts_calib = (w_sig.T @ mu_filters).astype(np.float32)
@@ -35,7 +35,7 @@ def _compute_calibration_stats(
         pt = ipts_sq[:, j]
         peaks, _ = find_peaks(pt, distance=dist)
         if len(peaks) > 1:
-            labels, centroids = simple_kmeans(pt[peaks], k=2)
+            centroids, labels = kmeans2(pt[peaks], 2, iter=10, minit="++", missing="raise", rng=np.random.default_rng(0))
             hi = int(np.argmax(centroids))
             spikes_calib[peaks[labels == hi], j] = 1
             spikes_centr[j] = float(centroids[hi])

@@ -67,7 +67,7 @@ def format_hdemg_signal(signal, grid_names, fsamp, discard_overrides=None):
             )
             current_ied = 4
 
-        elif "GR08MM1305" in grid_name in grid_name:
+        elif "GR08MM1305" in grid_name:
             el_channel_map = np.array(
                 [
                     [0, 25, 26, 51, 52],
