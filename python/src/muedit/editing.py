@@ -12,10 +12,11 @@ from typing import TypeAlias
 import numpy as np
 from scipy.signal import find_peaks
 
+from scipy.cluster.vq import kmeans2
+
 from muedit.decomp.algorithm import (
     extend_signal,
     pca_extended_signal,
-    simple_kmeans,
     subtract_mu_waveforms,
     whiten_extended_signal,
 )
@@ -106,7 +107,7 @@ def _recompute_spikes_in_window(
 
     if peaks.size <= 2:
         return None, spike_times
-    labels, centroids = simple_kmeans(pt[peaks], k=2)
+    centroids, labels = kmeans2(pt[peaks], 2, iter=10, minit="++", missing="raise", rng=np.random.default_rng(0))
     idx2 = int(np.argmax(centroids))
     spikes_new = peaks[labels == idx2]
     spikes_new = _remove_high_amplitude_outliers(pt, spikes_new)

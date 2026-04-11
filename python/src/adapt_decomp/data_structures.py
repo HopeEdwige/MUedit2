@@ -24,7 +24,7 @@ class Data(Dataset):
     def __init__(self,
         emg: torch.Tensor,
         preprocess: Optional[bool] = True,
-        config: Optional[Config] = Config
+        config: Optional[Config] = Config()
         ) -> None:
 
                                  
@@ -78,7 +78,7 @@ class Decomposition:
         emg_calib: torch.Tensor,
         ipts_calib: torch.Tensor,
         spikes_calib: torch.Tensor,
-        config: Optional[Config] = Config,
+        config: Optional[Config] = Config(),
         ) -> None:
 
                                       

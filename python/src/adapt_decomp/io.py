@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, Tuple, Literal, Union
 from torch.utils.data import Dataset
 
-class H5PraramsBatchWriter:
+class H5ParametersBatchWriter:
     
     def __init__(self, 
         path: Union[str, Path],
@@ -71,16 +71,16 @@ class H5PraramsBatchWriter:
                 data[key] = f[key][:]
         return data
 
-class H5PraramsDataset(Dataset):
-    
+class H5ParametersDataset(Dataset):
+
     def __init__(self, path:str) -> None:
-        pass
+        raise NotImplementedError
 
     def __len__(self) -> int:
-        pass
+        raise NotImplementedError
 
     def __getitem__(self, idx:int) -> Dict:
-        pass
+        raise NotImplementedError
 
 def save_output(path:str, outputs:Dict) -> None:
     with h5py.File(path, 'w') as f:

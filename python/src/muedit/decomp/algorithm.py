@@ -8,37 +8,6 @@ from scipy.signal import convolve, find_peaks
 _FIXED_POINT_TOL = 1e-4
 
 
-def simple_kmeans(data, k=2, max_iter=10):
-    """Run a robust 1D k-means with deterministic fallback behavior."""
-    values = np.asarray(data, dtype=float).reshape(-1)
-    if values.size == 0:
-        return np.array([], dtype=int), np.array([], dtype=float)
-    if values.size < k:
-        labels = np.zeros(values.size, dtype=int)
-        centroids = np.array([np.mean(values)] + [np.mean(values)] * (k - 1))
-        return labels, centroids
-
-    if np.allclose(values, values[0]):
-        labels = np.zeros(values.size, dtype=int)
-        centroids = np.array([values[0]] * k, dtype=float)
-        return labels, centroids
-
-    try:
-        centroids, labels = kmeans2(
-            values,
-            k,
-            iter=max_iter,
-            minit="++",
-            missing="warn",
-            rng=np.random.default_rng(0),
-        )
-    except Exception:
-        centroids = np.linspace(np.min(values), np.max(values), k)
-        distances = np.abs(values[:, None] - centroids[None, :])
-        labels = np.argmin(distances, axis=1)
-
-    return np.asarray(labels, dtype=int), np.asarray(centroids, dtype=float)
-
 
 def extend_signal(signal, exfactor):
     """Create delayed channel extension used by convolutive source separation."""
@@ -153,10 +122,9 @@ def get_spikes(w, x, fsamp):
     if len(spikes) <= 1:
         return icasig, np.asarray(spikes, dtype=int)
 
-    labels, centroids = simple_kmeans(icasig[spikes], k=2)
+    centroids, labels = kmeans2(icasig[spikes], 2, iter=10, minit="++", missing="raise", rng=np.random.default_rng(0))
     idx2 = int(np.argmax(centroids))
     spikes2 = spikes[labels == idx2]
-
 
     vals = icasig[spikes2]
     threshold = np.mean(vals) + 3 * np.std(vals)
@@ -202,8 +170,7 @@ def compute_silhouette(x, w, fsamp):
         return icasig, np.array(spikes, dtype=int), 0.0
 
 
-    labels, centroids = simple_kmeans(icasig[spikes], k=2)
-
+    centroids, labels = kmeans2(icasig[spikes], 2, iter=10, minit="++", missing="raise", rng=np.random.default_rng(0))
 
     idx2 = int(np.argmax(centroids))
     other_idx = 1 - idx2
@@ -305,7 +272,7 @@ def batch_process_filters(
             spikes, _ = find_peaks(pulse_t[mu_nb, :], distance=distance)
 
             if len(spikes) > 1:
-                labels, centroids = simple_kmeans(pulse_t[mu_nb, spikes], k=2)
+                centroids, labels = kmeans2(pulse_t[mu_nb, spikes], 2, iter=10, minit="++", missing="raise", rng=np.random.default_rng(0))
                 idx = np.argmax(centroids)
                 distime.append(spikes[labels == idx])
             else:

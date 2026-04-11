@@ -9,7 +9,7 @@ from typing import Tuple, Optional
 from scipy import signal
 from adapt_decomp.config import Config
 from adapt_decomp.data_structures import Data, Decomposition
-from adapt_decomp.io import H5PraramsBatchWriter
+from adapt_decomp.io import H5ParametersBatchWriter
 
 class AdaptDecomp():
 
@@ -57,7 +57,7 @@ class AdaptDecomp():
         self.sv_loss = torch.zeros((batches, self.units), dtype=torch.float32, device=self.config.device)
         self.total_loss = torch.zeros(batches, dtype=torch.float32, device=self.config.device)
 
-    def fortmat_outputs(self) -> None:
+    def format_outputs(self) -> None:
         outputs = {
             'spikes': self.spikes.detach().cpu().clone(),
             'ipts': self.ipts.detach().cpu().clone(),
@@ -71,7 +71,7 @@ class AdaptDecomp():
         }
         return outputs
 
-    def run_decomp(self, emg_batch: torch.Tensor, batch_idx = Optional[int]) -> None:
+    def run_decomp(self, emg_batch: torch.Tensor, batch_idx: Optional[int]) -> None:
 
                    
         t0 = time.time()
@@ -306,7 +306,7 @@ class AdaptDecomp():
 
                                       
         if self.config.save_params and self.save_path is not None:
-            self.saver = H5PraramsBatchWriter(
+            self.saver = H5ParametersBatchWriter(
                 path = self.save_path,
                 wh_shape = self.decomp.whitening.shape,
                 sv_shape = self.decomp.sep_vectors.shape,
@@ -331,7 +331,7 @@ class AdaptDecomp():
             self.ipts[idx_labels, :] = ipts
 
                             
-        outputs = self.fortmat_outputs()
+        outputs = self.format_outputs()
         if self.config.save_params:
             self.saver._save(outputs)
         return outputs
