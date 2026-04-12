@@ -17,7 +17,7 @@ BACK_PID=$!
 echo "Backend started (PID $BACK_PID) on :$MUEDIT_PORT"
 
 cd "$FRONTEND_DIR"
-python -m http.server "$MUEDIT_FRONTEND_PORT" &
+python -m http.server "$MUEDIT_FRONTEND_PORT" 2>/dev/null &
 FRONT_PID=$!
 echo "Frontend started (PID $FRONT_PID) on :$MUEDIT_FRONTEND_PORT"
 

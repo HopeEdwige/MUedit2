@@ -46,7 +46,7 @@ def serve_api() -> None:
     include_routers(app)
     host = os.environ.get("MUEDIT_HOST", "0.0.0.0")
     port = int(os.environ.get("MUEDIT_PORT") or os.environ.get("MUEDIT_BACKEND_PORT", "8000"))
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    uvicorn.run(app, host=host, port=port, log_level="warning", access_log=False)
 
 
 def run_decomposition_cli() -> None:
