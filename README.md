@@ -107,6 +107,7 @@ curl http://localhost:8000/api/v1/health
 
 ## Documentation
 
+- User guide: [docs/user-guide.md](docs/user-guide.md)
 - Saved files reference: [docs/saved-files.md](docs/saved-files.md)
 - Loader registry guide: [docs/loader-registry.md](docs/loader-registry.md)
 
