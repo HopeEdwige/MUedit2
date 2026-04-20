@@ -60,6 +60,22 @@ export function setupEditEvents(deps) {
   els.editUpdateBtn?.addEventListener("click", () => {
     void runEditAction(els.editUpdateBtn, updateMuFilter);
   });
+  if (els.editPeelOffToggle) {
+    const applyPeelOff = (btn, on) => {
+      btn.dataset.state = on ? "on" : "off";
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.classList.toggle("on", on);
+      const label = on ? "On" : "Off";
+      const shortEl = btn.querySelector(".peeloff-short");
+      const fullEl = btn.querySelector(".peeloff-full");
+      if (shortEl) shortEl.textContent = label;
+      if (fullEl) fullEl.textContent = `Peel-off: ${label}`;
+    };
+    applyPeelOff(els.editPeelOffToggle, false);
+    els.editPeelOffToggle.addEventListener("click", () => {
+      applyPeelOff(els.editPeelOffToggle, els.editPeelOffToggle.dataset.state !== "on");
+    });
+  }
   els.editOutliersBtn?.addEventListener("click", () => {
     void runEditAction(els.editOutliersBtn, () => removeOutliers());
   });

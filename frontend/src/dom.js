@@ -55,6 +55,7 @@ export const els = {
   editResetBtn: document.getElementById("editResetBtn"),
   editPulseCanvas: document.getElementById("editPulseCanvas"),
   editUpdateBtn: document.getElementById("editUpdateBtn"),
+  editPeelOffToggle: document.getElementById("editPeelOffToggle"),
   editAddBtn: document.getElementById("editAddBtn"),
   editDeleteSpikeBtn: document.getElementById("editDeleteSpikeBtn"),
   editOutliersBtn: document.getElementById("editOutliersBtn"),
