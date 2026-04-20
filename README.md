@@ -4,7 +4,7 @@ Decomposes high-density EMG signals into motor unit pulse trains.
 
 ## Status
 
-This software is currently in **beta** and is intended for testing purposes, not for research projects.
+This software is functional and ready for use. The `adapt_decomp` feature still requires fine tuning and remains in **beta**.
 
 ## Features
 
