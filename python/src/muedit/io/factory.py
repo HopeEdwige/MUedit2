@@ -26,7 +26,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from muedit.io.loaders import load_mat, load_otb4, load_otb_plus
+from muedit.io.loaders import load_bids_signal, load_mat, load_otb4, load_otb_plus
 from muedit.models import SignalImport
 
 LoaderFn = Callable[[str], SignalImport | dict[str, Any]]
@@ -57,6 +57,8 @@ _LOADERS: dict[str, LoaderFn] = {
     ".mat": load_mat,
     ".otb+": load_otb_plus,
     ".otb4": load_otb4,
+    ".bdf": load_bids_signal,
+    ".edf": load_bids_signal,
 }
 
 
@@ -82,8 +84,21 @@ def supported_extensions() -> tuple[str, ...]:
 
 
 def get_loader(filepath: str | Path) -> LoaderFn:
-    """Return loader function for a file path based on extension."""
-    ext = Path(filepath).suffix.lower()
+    """Return loader function for a file path based on extension.
+
+    When *filepath* is a directory, it is checked for a BIDS EMG recording
+    (a single ``*_emg.bdf`` or ``*_emg.edf`` file) and the BIDS loader is
+    returned if found.
+    """
+    path = Path(filepath)
+    if path.is_dir():
+        candidates = sorted(path.glob("*_emg.bdf")) + sorted(path.glob("*_emg.edf"))
+        if candidates:
+            return load_bids_signal
+        raise ValueError(
+            f"Directory does not contain a recognized BIDS EMG file: {path}"
+        )
+    ext = path.suffix.lower()
     loader = _LOADERS.get(ext)
     if loader is None:
         supported = ", ".join(supported_extensions())

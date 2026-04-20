@@ -366,6 +366,12 @@ const importStage = createImportStageService({
     if (els.editBidsRoot) els.editBidsRoot.value = bidsRoot;
     setEditBidsRoot(state, bidsRoot);
   },
+  setBidsEntitiesInput: (entities) => {
+    if (els.bidsSubject && entities.subject) els.bidsSubject.value = entities.subject;
+    if (els.bidsTask && entities.task) els.bidsTask.value = entities.task;
+    if (els.bidsSession) els.bidsSession.value = entities.session || "";
+    if (els.bidsRun && entities.run) els.bidsRun.value = entities.run;
+  },
 });
 
 const layoutStage = createLayoutStageService({

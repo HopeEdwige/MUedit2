@@ -1,3 +1,5 @@
+import { parseBidsEntitiesFromLabel } from "../../session.js";
+
 export function createImportStageService(deps) {
   const {
     apiJson,
@@ -11,6 +13,7 @@ export function createImportStageService(deps) {
     handleRawFilePath,
     loadDecompositionForEditByPath,
     setEditBidsRootInput,
+    setBidsEntitiesInput,
   } = deps;
 
   async function handleNativeDialogOpen() {
@@ -40,6 +43,11 @@ export function createImportStageService(deps) {
     }
     if (kind === "raw") {
       await handleRawFilePath(path, name);
+      const lname = name.toLowerCase();
+      if (lname.endsWith(".bdf") || lname.endsWith(".edf")) {
+        const entityLabel = name.replace(/_emg\.[^.]+$/i, "").replace(/\.[^.]+$/, "");
+        setBidsEntitiesInput(parseBidsEntitiesFromLabel(entityLabel));
+      }
     } else if (kind === "decomposition") {
       await loadDecompositionForEditByPath(path);
     } else {

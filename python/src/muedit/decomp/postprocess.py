@@ -322,9 +322,16 @@ def export_step(
     progress_cb: Callable[[str, dict[str, Any]], None] | None,
 ) -> tuple[dict[str, Any], str]:
     """Build export payloads and optionally persist the default NPZ artifact."""
-    save_path = str(
-        Path(loaded.full_path).with_name(Path(loaded.full_path).stem + "_decomp.npz")
-    )
+    bids_entity_label = prep.loader_meta.get("bids_entity_label")
+    bids_emg_path = prep.loader_meta.get("bids_emg_path")
+    if bids_entity_label and bids_emg_path:
+        decomp_dir = Path(bids_emg_path).parent.parent / "decomp"
+        decomp_dir.mkdir(parents=True, exist_ok=True)
+        save_path = str(decomp_dir / f"{bids_entity_label}_decomp.npz")
+    else:
+        save_path = str(
+            Path(loaded.full_path).with_name(Path(loaded.full_path).stem + "_decomp.npz")
+        )
 
     preview = _build_preview_payload(
         signal=prep.signal,

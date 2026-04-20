@@ -16,7 +16,7 @@ export const COLORS = {
   muted: "#b7b7b7",
 };
 
-export const RAW_SIGNAL_EXTENSIONS = [".mat", ".otb+", ".otb4"];
+export const RAW_SIGNAL_EXTENSIONS = [".mat", ".otb+", ".otb4", ".bdf", ".edf"];
 export const DECOMPOSITION_EXTENSIONS = [".npz"];
 
 export const UNIFORM_PULSE_COLOR = "#f5f5f5";
