@@ -407,7 +407,8 @@ export async function requestFilterUpdate(deps, mode) {
       const muUid = state.edit.muUids?.[muIdx] ?? `mu${muIdx}`;
       const distimesAfter = state.edit.distimes?.[muIdx] || [];
       const { added, removed } = spikesDiff(distimesBefore, distimesAfter);
-      const entry = { type: "update_filter", mu_uid: muUid, view_start: start, view_end: end };
+      const peeloff = els.editPeelOffToggle?.dataset.state === "on";
+      const entry = { type: "update_filter", mu_uid: muUid, view_start: start, view_end: end, use_peeloff: peeloff };
       if (added.length) entry.spikes_added = added;
       if (removed.length) entry.spikes_removed = removed;
       deps.appendEditHistory(entry);
