@@ -1,4 +1,4 @@
-# MUedit (v2.0.0)
+# MUedit (2.0)
 
 Decomposes high-density EMG signals into motor unit pulse trains.
 
@@ -12,6 +12,20 @@ This software is currently in **beta** and is intended for testing purposes, not
 - Adaptive decomposition workflows (via `adapt_decomp`)
 - Web-based interface with FastAPI backend and JavaScript frontend
 - Cross-platform launchers (macOS/Linux and Windows)
+- Interactive editing of decomposed motor units
+- BIDS-compliant export of raw EMG and decomposition results
+
+## Supported Input Formats
+
+| Format | Extension | Description |
+|---|---|---|
+| MATLAB | `.mat` | v5 and v7.3 (HDF5) signal structs |
+| OTB+ | `.otb+` | OT Biolab+ archive (tar/zip with XML + `.sig`) |
+| OTB4 | `.otb4` | OT Biolab4 proprietary binary format |
+| BIDS EMG | `.bdf`, `.edf` | BIDS-formatted recordings with `_emg_channels.tsv` sidecar |
+| Decomposition | `.npz` | Saved decomposition output (for editing) |
+
+For BIDS input, point to either the `*_emg.bdf/.edf` file directly or the `emg/` directory. The loader reads all grids and auxiliary channels defined in the accompanying `*_emg_channels.tsv`.
 
 ## Requirements
 
@@ -93,8 +107,8 @@ curl http://localhost:8000/api/v1/health
 
 ## Documentation
 
-- Workflow guide: [docs/workflows.md](docs/workflows.md)
 - Saved files reference: [docs/saved-files.md](docs/saved-files.md)
+- Loader registry guide: [docs/loader-registry.md](docs/loader-registry.md)
 
 ## Acknowledgment
 

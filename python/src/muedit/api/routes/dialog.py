@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/dialog")
 
 # Extensions accepted by the dialog
-_EXTENSIONS = ["mat", "otb+", "otb4", "npz"]
+_EXTENSIONS = ["mat", "otb+", "otb4", "npz", "bdf", "edf"]
 
 
 def _open_dialog_macos() -> str | None:
@@ -51,9 +51,10 @@ try:
     path = filedialog.askopenfilename(
         title='Select EMG signal or decomposition file',
         filetypes=[
-            ('EMG signal files', '*.mat *.otb+ *.otb4 *.npz'),
+            ('EMG signal files', '*.mat *.otb+ *.otb4 *.npz *.bdf *.edf'),
             ('MATLAB files', '*.mat'),
             ('OTB files', '*.otb+ *.otb4'),
+            ('BIDS EMG files', '*.bdf *.edf'),
             ('Decomposition files', '*.npz'),
             ('All files', '*'),
         ],
