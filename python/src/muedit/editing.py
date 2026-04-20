@@ -56,6 +56,7 @@ def _recompute_spikes_in_window(
     peeloff_spike_times: list[SpikeTimes] | None = None,
     peeloff_win: float = 0.025,
     emg_offset: int = 0,
+    use_peeloff: bool = False,
 ) -> FilterUpdateResult:
     """Recompute motor-unit pulse train and spikes within a visible time window."""
     if emg.size == 0 or start >= end:
@@ -81,14 +82,14 @@ def _recompute_spikes_in_window(
     eigenvectors, eigenvalues_diag = pca_extended_signal(e_sig)
     w_sig, _, _ = whiten_extended_signal(e_sig, eigenvectors, eigenvalues_diag)
 
-    # if peeloff_spike_times:
-    #     for other_spikes in peeloff_spike_times:
-    #         local_spikes = np.asarray(other_spikes, dtype=int) - start
-    #         local_spikes = local_spikes[
-    #             (local_spikes >= edge) & (local_spikes < (win_len - edge))
-    #         ]
-    #         if local_spikes.size > 0:
-    #             w_sig = subtract_mu_waveforms(w_sig, local_spikes, fsamp, peeloff_win)
+    if use_peeloff and peeloff_spike_times:
+        for other_spikes in peeloff_spike_times:
+            local_spikes = np.asarray(other_spikes, dtype=int) - start
+            local_spikes = local_spikes[
+                (local_spikes >= edge) & (local_spikes < (win_len - edge))
+            ]
+            if local_spikes.size > 0:
+                w_sig = subtract_mu_waveforms(w_sig, local_spikes, fsamp, peeloff_win)
 
     mu_filters = np.sum(w_sig[:, spikes2], axis=1)
     norm = float(np.linalg.norm(mu_filters))
@@ -131,6 +132,7 @@ def update_motor_unit_filter_window(
     peeloff_spike_times: list[SpikeTimes] | None = None,
     peeloff_win: float = 0.025,
     emg_offset: int = 0,
+    use_peeloff: bool = False,
 ) -> FilterUpdateResult:
     """Update a motor-unit pulse train and spikes inside a time window.
 
@@ -162,6 +164,7 @@ def update_motor_unit_filter_window(
         peeloff_spike_times=peeloff_spike_times,
         peeloff_win=peeloff_win,
         emg_offset=emg_offset,
+        use_peeloff=use_peeloff,
     )
     return pt, updated
 

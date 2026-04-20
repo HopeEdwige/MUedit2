@@ -392,6 +392,7 @@ export async function requestFilterUpdate(deps, mode) {
           pulse_train: pulse,
           view_start: start,
           view_end: end,
+          use_peeloff: els.editPeelOffToggle?.dataset.state === "on",
         }),
       },
       120000,

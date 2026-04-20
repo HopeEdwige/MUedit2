@@ -471,6 +471,7 @@ def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
     peeloff_win = as_float(payload.get("peel_off_win"), "peel_off_win", default=0.025)
     if peeloff_win <= 0:
         peeloff_win = 0.025
+    use_peeloff = bool(payload.get("use_peeloff", False))
 
     view_start = as_int(payload.get("view_start"), "view_start", default=0)
     view_end = as_int(payload.get("view_end"), "view_end", default=0)
@@ -559,6 +560,7 @@ def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
         ],
         peeloff_win=peeloff_win,
         emg_offset=bids_emg_offset,
+        use_peeloff=use_peeloff,
     )
 
     pulse_train = payload.get("pulse_train")

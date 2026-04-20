@@ -1187,6 +1187,34 @@ body {
   margin-left: 0;
 }
 
+/* Peel-off toggle collapsed width — wide enough to show "Off" / "On" */
+#editPeelOffToggle {
+  max-width: 140px;
+}
+
+/* Peel-off toggle: short label visible when collapsed, swaps with full label on expand */
+.edit-toolbar-row .icon-expand-btn .peeloff-short {
+  max-width: 50px;
+  opacity: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: max-width 0.2s ease, opacity 0.15s ease;
+}
+.edit-toolbar-row .icon-expand-btn:hover .peeloff-short,
+.edit-toolbar-row .icon-expand-btn:focus-visible .peeloff-short {
+  max-width: 0;
+  opacity: 0;
+}
+.edit-toolbar-row .icon-expand-btn .peeloff-full {
+  max-width: 0;
+  opacity: 0;
+}
+.edit-toolbar-row .icon-expand-btn:hover .peeloff-full,
+.edit-toolbar-row .icon-expand-btn:focus-visible .peeloff-full {
+  max-width: 140px;
+  opacity: 1;
+}
+
 #editSaveBtn {
   background: #303030;
   border: 1px solid var(--border);
