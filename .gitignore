@@ -45,7 +45,7 @@ python/*.log
 frontend/node_modules/
 
 # ── EMG data files (large binaries — store on Figshare or similar) ─────────
-*.mat
+
 *.bdf
 *.edf
 *.otb4
