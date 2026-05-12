@@ -1,7 +1,7 @@
 {
   "TaskName": "trapezoid",
   "EMGReference": "ChannelSpecific",
-  "SamplingFrequency": 2048.0,
+  "SamplingFrequency": 10000.0,
   "PowerLineFrequency": 50.0,
   "RecordingType": "continuous",
   "EMGPlacementScheme": "ChannelSpecific",
@@ -9,10 +9,7 @@
     "Description": "n/a"
   },
   "SoftwareFilters": "n/a",
-  "Muscles": [
-    "Biceps Brachii"
-  ],
   "EMGChannelCount": 64,
   "BIDSVersion": "1.10.0",
-  "RecordingDuration": 32.17529296875
+  "RecordingDuration": 5.0
 }
