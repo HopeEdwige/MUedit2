@@ -24,14 +24,14 @@ from muedit.api.common import (
     safe_unlink,
     save_upload_to_temp,
 )
-from muedit.decomp.signal_io import (
+from muedit.decomp.io import (
     build_pulse_trains_from_distimes,
     load_decomposition_file,
     load_decomposition_signal_context,
     normalize_distimes,
 )
-from muedit.decomp.algorithm import rem_duplicates
-from muedit.editing import (
+from muedit.decomp.algorithm import DEDUP_JITTER, DEDUP_MAXLAG_RATIO, rem_duplicates
+from muedit.editing.operations import (
     add_artifact_in_roi,
     add_spikes_in_roi,
     delete_high_discharge_rate_spikes_in_roi,
@@ -39,7 +39,7 @@ from muedit.editing import (
     remove_discharge_rate_outliers,
     update_motor_unit_filter_window,
 )
-from muedit.utils import format_hdemg_signal
+from muedit.signal.grid import format_hdemg_signal
 
 
 def _infer_bids_root_from_decomp_path(filepath: str) -> Path | None:
@@ -322,6 +322,23 @@ def load_decomposition_binary_from_path(filepath: str) -> Response | dict[str, A
     )
 
 
+def _dedup(
+    pulse_trains: np.ndarray,
+    distimes: list,
+    dup_tol: float,
+    fsamp: float,
+) -> tuple[np.ndarray, list, list[int]]:
+    return rem_duplicates(
+        np.asarray(pulse_trains, dtype=float),
+        [np.asarray(d, dtype=int) for d in distimes],
+        [np.asarray(d, dtype=int) for d in distimes],
+        round(fsamp / DEDUP_MAXLAG_RATIO),
+        DEDUP_JITTER,
+        dup_tol,
+        fsamp,
+    )
+
+
 def _normalize_flagged(raw: Any, nmu: int) -> list[bool]:
     if not isinstance(raw, (list, tuple)):
         return [False] * nmu
@@ -362,8 +379,11 @@ def save_edits(payload: dict[str, Any]):
 
     fsamp_raw = payload.get("fsamp")
     fsamp = float(fsamp_raw) if fsamp_raw is not None else None
-    grid_names = payload.get("grid_names") or ["Grid 1"]
     mu_grid_index = _normalize_mu_grid_index(payload.get("mu_grid_index"), len(distimes))
+    expected_grid_count = (max(mu_grid_index) + 1) if mu_grid_index else 1
+    grid_names = _pad_grid_names(
+        payload.get("grid_names") or [], expected_grid_count, []
+    )
     parameters = payload.get("parameters") or {}
     muscle_names = _normalize_muscle_names(payload)
 
@@ -418,15 +438,7 @@ def save_edits(payload: dict[str, Any]):
 
     if remove_duplicates and len(distimes) > 1 and fsamp and fsamp > 0:
         dup_tol = float(parameters.get("duplicatesthresh", 0.3))
-        dedup_pulses, dedup_distimes, kept_idx = rem_duplicates(
-            np.asarray(pulse_trains, dtype=float),
-            [np.asarray(d, dtype=int) for d in distimes],
-            [np.asarray(d, dtype=int) for d in distimes],
-            round(fsamp / 40),
-            0.00025,
-            dup_tol,
-            fsamp,
-        )
+        dedup_pulses, dedup_distimes, kept_idx = _dedup(pulse_trains, distimes, dup_tol, fsamp)
         pulse_trains = dedup_pulses if dedup_pulses.size else np.zeros((0, total_samples))
         distimes = [
             sorted({int(v) for v in np.asarray(d, dtype=int).tolist() if int(v) >= 0})
@@ -752,15 +764,7 @@ def remove_duplicates_service(payload: dict[str, Any]) -> dict[str, Any]:
         })
 
     dup_tol = float(parameters.get("duplicatesthresh", 0.3))
-    dedup_pulses, dedup_distimes, kept_idx = rem_duplicates(
-        np.asarray(pulse_trains, dtype=float),
-        [np.asarray(d, dtype=int) for d in distimes],
-        [np.asarray(d, dtype=int) for d in distimes],
-        round(fsamp / 40),
-        0.00025,
-        dup_tol,
-        fsamp,
-    )
+    dedup_pulses, dedup_distimes, kept_idx = _dedup(pulse_trains, distimes, dup_tol, fsamp)
     dedup_distimes_clean = [
         sorted({int(v) for v in np.asarray(d, dtype=int).tolist() if int(v) >= 0})
         for d in dedup_distimes

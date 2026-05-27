@@ -47,9 +47,6 @@ def _compute_calibration_stats(
     return ipts_calib, spikes_calib, base_centr, spikes_centr
 
 
-
-
-
 def _to_numpy_array(value: Any) -> np.ndarray:
     """Coerce a value (tensor, list, or None) to a NumPy array."""
     if value is None:
@@ -129,10 +126,6 @@ def _run_one_pass(
         _to_numpy_array(outputs_map.get("spikes")),
         metrics,
     )
-
-
-
-
 
 
 def _merge_metrics(
@@ -246,10 +239,6 @@ def _run_adapt_decomp_bidirectional(
     )
 
 
-
-
-
-
 def adaptive_batch_process(
     mu_filters_by_window: dict[int, np.ndarray],
     w_sig_by_window: dict[int, np.ndarray],
@@ -280,7 +269,7 @@ def adaptive_batch_process(
         )
         return pulse_t, fallback_distime, {}
 
-    from muedit.utils import demean
+    from muedit.signal.filters import demean
 
     total_mus = sum(f.shape[1] for f in mu_filters_by_window.values() if f.size > 0)
     if total_mus == 0:
