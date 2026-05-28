@@ -7,13 +7,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
+
+from muedit.api.contracts import success_payload
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/dialog")
 
-# Extensions accepted by the dialog
 _EXTENSIONS = ["mat", "otb+", "otb4", "npz", "bdf", "edf"]
 
 
@@ -87,7 +90,7 @@ def _open_dialog_tkinter() -> str | None:
 
 
 @router.get("/open-file")
-def open_file_dialog() -> dict[str, str | None]:
+def open_file_dialog() -> dict[str, Any]:
     """Return the selected file path and basename from a native open dialog."""
     try:
         if sys.platform == "darwin":
@@ -96,8 +99,8 @@ def open_file_dialog() -> dict[str, str | None]:
             path = _open_dialog_tkinter()
 
         if not path:
-            return {"path": None, "name": None}
-        return {"path": path, "name": Path(path).name}
+            return success_payload({"path": None, "name": None})
+        return success_payload({"path": path, "name": Path(path).name})
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=408, detail="File dialog timed out") from None
     except Exception as exc:

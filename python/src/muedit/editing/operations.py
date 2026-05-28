@@ -1,18 +1,12 @@
-"""Motor-unit editing utilities used by API routes and interactive tooling.
-
-The functions in this module operate on a single motor unit pulse train and its
-spike-time indices. They are intentionally stateless to simplify route handlers
-and make behavior predictable.
-"""
+"""Motor-unit editing utilities used by API routes and interactive tooling."""
 
 from __future__ import annotations
 
 from typing import TypeAlias
 
 import numpy as np
-from scipy.signal import find_peaks
-
 from scipy.cluster.vq import kmeans2
+from scipy.signal import find_peaks
 
 from muedit.decomp.algorithm import (
     extend_signal,
@@ -29,15 +23,7 @@ FilterUpdateResult: TypeAlias = tuple[np.ndarray | None, SpikeTimes]
 def _remove_high_amplitude_outliers(
     pulse_train: np.ndarray, spike_indices: np.ndarray
 ) -> np.ndarray:
-    """Drop candidate spikes with unusually large amplitudes.
-
-    Args:
-        pulse_train: Pulse-train vector.
-        spike_indices: Candidate spike indices.
-
-    Returns:
-        Filtered spike indices.
-    """
+    """Drop candidate spikes with unusually large amplitudes."""
     if spike_indices.size == 0:
         return spike_indices
     threshold = np.mean(pulse_train[spike_indices]) + 3 * np.std(
@@ -58,6 +44,7 @@ def _recompute_spikes_in_window(
     emg_offset: int = 0,
     use_peeloff: bool = False,
     artifact_times: SpikeTimes | None = None,
+    lock_spikes: bool = False,
 ) -> FilterUpdateResult:
     """Recompute motor-unit pulse train and spikes within a visible time window."""
     if emg.size == 0 or start >= end:
@@ -125,6 +112,24 @@ def _recompute_spikes_in_window(
     spikes_new = _remove_high_amplitude_outliers(pt, spikes_new)
 
     spikes_new = spikes_new.astype(int)
+    
+    if lock_spikes and spikes1.size > 0:
+        # Realign original spikes to their exact peak positions within ±10 samples
+        realigned_spikes = []
+        for orig_spike in spikes1:
+            local_pos = int(orig_spike - start)
+            search_start = max(0, local_pos - 10)
+            search_end = min(len(pt), local_pos + 11)
+            local_peaks_in_range = peaks[(peaks >= search_start) & (peaks < search_end)]
+            if local_peaks_in_range.size > 0:
+                nearest_peak = local_peaks_in_range[np.argmin(np.abs(local_peaks_in_range - local_pos))]
+                realigned_spikes.append(int(nearest_peak))
+            else:
+                realigned_spikes.append(local_pos)
+        # Merge realigned original spikes with newly detected spikes
+        merged_spikes = sorted(set(realigned_spikes) | set(spikes_new.tolist()))
+        spikes_new = np.array(merged_spikes, dtype=int)
+    
     updated = [s for s in spike_times if s < start + edge or s > end - edge]
     updated.extend((spikes_new + start).tolist())
     updated = sorted({int(x) for x in updated if x >= 0})
@@ -145,26 +150,9 @@ def update_motor_unit_filter_window(
     emg_offset: int = 0,
     use_peeloff: bool = False,
     artifact_times: SpikeTimes | None = None,
+    lock_spikes: bool = False,
 ) -> FilterUpdateResult:
-    """Update a motor-unit pulse train and spikes inside a time window.
-
-    Args:
-        emg: EMG matrix with shape ``(n_channels, n_samples)``. May cover only
-            the view window when loaded via partial reads; in that case pass
-            ``emg_offset=view_start`` so sample indices are mapped correctly.
-        emg_mask: Per-channel mask where ``1`` indicates a discarded channel.
-        spike_times: Existing discharge times for one motor unit.
-        fsamp: Sampling frequency in Hz.
-        start: Window start sample (inclusive), in absolute recording coordinates.
-        end: Window end sample (exclusive), in absolute recording coordinates.
-        nbextchan: Number of extended channels target for decomposition filtering.
-        emg_offset: First sample index represented by ``emg[:,0]``. Zero when
-            the full recording is passed; equal to ``view_start`` for partial reads.
-
-    Returns:
-        Tuple ``(pulse_train_segment, updated_spike_times)`` where
-        ``pulse_train_segment`` may be ``None`` when no update is possible.
-    """
+    """Update a motor-unit pulse train and spikes inside a time window."""
     emg_sel = emg[emg_mask == 0, :] if emg_mask.size else emg
     pt, updated = _recompute_spikes_in_window(
         emg_sel,
@@ -178,6 +166,7 @@ def update_motor_unit_filter_window(
         emg_offset=emg_offset,
         use_peeloff=use_peeloff,
         artifact_times=artifact_times,
+        lock_spikes=lock_spikes,
     )
     return pt, updated
 
@@ -210,11 +199,7 @@ def add_artifact_in_roi(
     x_end: int,
     y_min: float,
 ) -> SpikeTimes:
-    """Add an artifact peak inside a rectangular ROI.
-
-    The selected peak will be excluded from filter recomputation; its signal
-    will be subtracted (peel-off style) when updating the MU filter.
-    """
+    """Add an artifact peak inside a rectangular ROI."""
     temp = pulse.copy()
     mask = (np.arange(len(temp)) >= x_start) & (np.arange(len(temp)) <= x_end)
     temp[~mask] = 0
@@ -259,11 +244,7 @@ def delete_high_discharge_rate_spikes_in_roi(
     x_end: int,
     y_min: float,
 ) -> SpikeTimes:
-    """Delete one spike from high-rate pairs within an ROI.
-
-    For each pair with discharge rate above ``y_min`` within the selected window,
-    the lower-amplitude spike of the pair is removed.
-    """
+    """Delete one spike from high-rate pairs within an ROI."""
     ordered = sorted(spike_times)
     if len(ordered) < 2:
         return sorted({int(x) for x in ordered})
@@ -301,11 +282,7 @@ def remove_discharge_rate_outliers(
     fsamp: float,
     z_factor: float = 3.0,
 ) -> SpikeTimes:
-    """Remove spikes belonging to discharge-rate outlier pairs.
-
-    Outlier pairs are detected using ``mean + z_factor * std`` over discharge
-    rates. For each outlier pair, the lower-amplitude spike is removed.
-    """
+    """Remove spikes belonging to discharge-rate outlier pairs."""
     ordered = sorted({int(x) for x in spike_times})
     if len(ordered) < 3:
         return ordered

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import queue
-import struct
 import threading
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import numpy as np
@@ -20,13 +19,13 @@ from muedit.api.cache import (
     _store_decomp_preview_binary,
 )
 from muedit.api.common import (
+    _pack_json_f32_payload,
     build_params,
     json_default,
     make_json_safe,
     parse_discard_channels,
     parse_json_object,
     parse_rois,
-    safe_unlink,
     save_upload_to_temp,
     serialize_preview,
     summarize_result,
@@ -52,20 +51,7 @@ def _encode_decompose_preview_f32(preview: dict[str, Any]) -> bytes:
     preview_copy["pulse_trains_full_shape"] = [int(pulse_full.shape[0]), int(pulse_full.shape[1])]
     preview_copy["pulse_trains_all_shape"] = [int(pulse_all.shape[0]), int(pulse_all.shape[1])]
     preview_copy["pulse_dtype"] = "float32"
-    meta_bytes = json.dumps(preview_copy, separators=(",", ":")).encode("utf-8")
-
-    parts: list[bytes] = []
-    parts.append(b"MDPV")
-    parts.append(struct.pack("<I", 1))
-    parts.append(struct.pack("<I", len(meta_bytes)))
-    parts.append(struct.pack("<I", int(pulse_full.shape[0])))
-    parts.append(struct.pack("<I", int(pulse_full.shape[1])))
-    parts.append(struct.pack("<I", int(pulse_all.shape[0])))
-    parts.append(struct.pack("<I", int(pulse_all.shape[1])))
-    parts.append(meta_bytes)
-    parts.append(pulse_full.astype("<f4", copy=False).tobytes(order="C"))
-    parts.append(pulse_all.astype("<f4", copy=False).tobytes(order="C"))
-    return b"".join(parts)
+    return _pack_json_f32_payload(b"MDPV", preview_copy, pulse_full, pulse_all)
 
 
 def fetch_decompose_preview_binary(token: str) -> Response:
@@ -129,12 +115,12 @@ def decomposition_event_stream(
     preloaded_signal: dict[str, Any] | None = None,
     cleanup: Callable[[str], None] | None = None,
     binary_preview: bool = False,
-):
+) -> Iterator[str]:
     """Yield NDJSON progress events while decomposition executes in background thread."""
     q: queue.Queue[dict[str, Any] | None] = queue.Queue()
     terminal_emitted = False
 
-    def progress(stage: str, payload: dict[str, Any]):
+    def progress(stage: str, payload: dict[str, Any]) -> None:
         """Normalize and queue progress callback payload from pipeline."""
         nonlocal terminal_emitted
         event = {"stage": stage}
@@ -265,7 +251,3 @@ def parse_stream_options(
     )
 
 
-def cleanup_temp_file(path: str | None) -> None:
-    """Delete temporary upload file when present."""
-    if path:
-        safe_unlink(path)

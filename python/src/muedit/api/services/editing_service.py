@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import json
-import struct
 from pathlib import Path
 from typing import Any
 
@@ -11,12 +10,12 @@ from fastapi import HTTPException, UploadFile
 from fastapi.responses import Response
 
 from muedit.api.cache import (
-    _load_bids_grid,
     _get_edit_signal_context,
     _get_edit_signal_context_by_label,
     _store_edit_signal_context,
 )
 from muedit.api.common import (
+    _pack_json_f32_payload,
     as_float,
     as_int,
     make_json_safe,
@@ -24,13 +23,28 @@ from muedit.api.common import (
     safe_unlink,
     save_upload_to_temp,
 )
+from muedit.api.services.bids_helpers import (
+    _infer_bids_root_from_decomp_path,
+    _load_bids_grid,
+    _parse_subject_session_from_entity_label,
+    _read_bids_channels_sidecar,
+)
+from muedit.api.services.edit_helpers import (
+    _expected_grid_count,
+    _generate_mu_uids,
+    _normalize_flagged,
+    _normalize_mu_grid_index,
+    _normalize_muscle_names,
+    _pad_grid_names,
+)
+from muedit.decomp.algorithm import DEDUP_JITTER, DEDUP_MAXLAG_RATIO, rem_duplicates
 from muedit.decomp.io import (
     build_pulse_trains_from_distimes,
     load_decomposition_file,
     load_decomposition_signal_context,
     normalize_distimes,
 )
-from muedit.decomp.algorithm import DEDUP_JITTER, DEDUP_MAXLAG_RATIO, rem_duplicates
+from muedit.decomp.postprocess import _save_npz_with_app_schema
 from muedit.editing.operations import (
     add_artifact_in_roi,
     add_spikes_in_roi,
@@ -40,152 +54,6 @@ from muedit.editing.operations import (
     update_motor_unit_filter_window,
 )
 from muedit.signal.grid import format_hdemg_signal
-
-
-def _infer_bids_root_from_decomp_path(filepath: str) -> Path | None:
-    raw = str(filepath or "")
-    if not raw:
-        return None
-    path = Path(raw).expanduser().resolve()
-    parts = list(path.parts)
-
-    # Preferred: directory before first sub-<id> segment.
-    sub_idx = next(
-        (i for i, part in enumerate(parts) if part.lower().startswith("sub-")),
-        -1,
-    )
-    if sub_idx > 0:
-        return Path(*parts[:sub_idx])
-
-    # Fallback: keep root up to muedit_out marker when present.
-    marker = "muedit_out"
-    marker_idx = next((i for i, part in enumerate(parts) if part.lower() == marker), -1)
-    if marker_idx >= 0:
-        return Path(*parts[: marker_idx + 1])
-    return None
-
-
-def _normalize_bids_meta_value(value: str | None) -> str:
-    text = str(value or "").strip()
-    if not text or text.lower() == "n/a":
-        return ""
-    return text
-
-
-def _grid_sort_key(group: str) -> tuple[int, str]:
-    text = str(group or "").strip()
-    lower = text.lower()
-    if lower.startswith("grid"):
-        suffix = text[4:].strip()
-        if suffix.isdigit():
-            return (int(suffix), text)
-    return (10**9, text)
-
-
-def _read_bids_channels_sidecar(channels_path: Path) -> tuple[list[str], list[str], float | None]:
-    by_group: dict[str, tuple[str, str]] = {}
-    fsamp: float | None = None
-    with channels_path.open("r", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        for row in reader:
-            if (row.get("type") or "").strip().upper() != "EMG":
-                continue
-            if fsamp is None:
-                raw_fsamp = _normalize_bids_meta_value(row.get("sampling_frequency"))
-                if raw_fsamp:
-                    try:
-                        fsamp = float(raw_fsamp)
-                    except ValueError:
-                        fsamp = None
-            group = (row.get("group") or "").strip()
-            if not group:
-                continue
-            if group in by_group:
-                continue
-            grid_name = _normalize_bids_meta_value(row.get("grid_name")) or group
-            muscle = _normalize_bids_meta_value(row.get("target_muscle"))
-            by_group[group] = (grid_name, muscle)
-    if not by_group:
-        return [], [], fsamp
-    ordered_groups = sorted(by_group.keys(), key=_grid_sort_key)
-    grid_names = [by_group[group][0] for group in ordered_groups]
-    muscles = [by_group[group][1] for group in ordered_groups]
-    while muscles and not muscles[-1]:
-        muscles.pop()
-    return grid_names, muscles, fsamp
-
-
-def _expected_grid_count(loaded: dict[str, Any]) -> int:
-    count = 0
-    grid_names = loaded.get("grid_names")
-    if isinstance(grid_names, list):
-        count = max(count, len(grid_names))
-    muscles = loaded.get("muscle")
-    if isinstance(muscles, list):
-        count = max(count, len(muscles))
-    mu_grid_index = loaded.get("mu_grid_index")
-    if isinstance(mu_grid_index, list) and mu_grid_index:
-        try:
-            count = max(count, int(max(mu_grid_index)) + 1)
-        except Exception:
-            pass
-    return max(1, count)
-
-
-def _pad_grid_names(names: list[str], expected_count: int, fallback: list[str]) -> list[str]:
-    out = [str(x).strip() for x in (names or []) if str(x).strip()]
-    if not out:
-        out = [str(x).strip() for x in (fallback or []) if str(x).strip()]
-    target_count = max(int(expected_count or 0), len(out))
-    while len(out) < target_count:
-        fill = out[-1] if out else f"Grid {len(out) + 1}"
-        out.append(fill)
-    return out
-
-
-def _normalize_muscle_names(payload: dict[str, Any]) -> list[str]:
-    muscle_names_raw = payload.get("muscle_names") or payload.get("muscle") or []
-    if isinstance(muscle_names_raw, str):
-        return [muscle_names_raw.strip()] if muscle_names_raw.strip() else []
-    if isinstance(muscle_names_raw, (list, tuple)):
-        return [str(x).strip() for x in muscle_names_raw if str(x).strip()]
-    return []
-
-
-def _parse_subject_session_from_entity_label(entity_label: str) -> tuple[str, str | None]:
-    subject = "01"
-    session: str | None = None
-    for part in str(entity_label).split("_"):
-        if part.startswith("sub-") and len(part) > 4:
-            subject = part[4:]
-        elif part.startswith("ses-") and len(part) > 4:
-            session = part[4:]
-    return subject, session
-
-
-def _save_npz(
-    out_path: str | Path,
-    pulse_trains: np.ndarray,
-    distimes: list[list[int]],
-    fsamp: Any,
-    grid_names: list[str],
-    mu_grid_index: list[int],
-    muscle_names: list[str],
-    parameters: dict[str, Any],
-    total_samples: int,
-) -> None:
-    np.savez_compressed(
-        out_path,
-        pulse_trains=pulse_trains,
-        discharge_times=np.array(distimes, dtype=object),
-        fsamp=fsamp,
-        grid_names=np.array(grid_names, dtype=object),
-        mu_grid_index=np.array(mu_grid_index, dtype=int),
-        muscle_names=np.array(muscle_names, dtype=object),
-        muscle=np.array(muscle_names, dtype=object),
-        parameters=np.array([parameters], dtype=object),
-        total_samples=total_samples,
-    )
 
 
 def _save_editlog(
@@ -201,18 +69,19 @@ def _save_editlog(
         json.dump(payload, fh, indent=2)
 
 
+def _init_loaded_decomp(filepath: str, file_label: str) -> dict[str, Any]:
+    loaded = load_decomposition_file(filepath)
+    signal_ctx = load_decomposition_signal_context(filepath)
+    if signal_ctx:
+        loaded["edit_signal_token"] = _store_edit_signal_context(signal_ctx, file_label)
+    loaded["file_label"] = file_label
+    return loaded
+
+
 async def load_decomposition(file: UploadFile) -> dict[str, Any]:
     tmp_path = await save_upload_to_temp(file)
     try:
-        loaded = load_decomposition_file(tmp_path)
-        signal_ctx = load_decomposition_signal_context(tmp_path)
-        if signal_ctx:
-            loaded["edit_signal_token"] = _store_edit_signal_context(
-                signal_ctx,
-                file.filename,
-            )
-        loaded["file_label"] = file.filename
-        return make_json_safe(loaded)
+        return make_json_safe(_init_loaded_decomp(tmp_path, file.filename))
     finally:
         safe_unlink(tmp_path)
 
@@ -222,27 +91,15 @@ def _encode_edit_load_f32(loaded: dict[str, Any]) -> bytes | None:
     pulse_raw = loaded.get("pulse_trains_full")
     if pulse_raw is None:
         return None
-
     pulse = np.asarray(pulse_raw, dtype=np.float32)
     if pulse.ndim != 2:
         return None
-
     metadata = dict(loaded)
     metadata.pop("pulse_trains_full", None)
     metadata["pulse_shape"] = [int(pulse.shape[0]), int(pulse.shape[1])]
     metadata["pulse_dtype"] = "float32"
     metadata["pulse_binary"] = True
-    meta_bytes = json.dumps(make_json_safe(metadata), separators=(",", ":")).encode("utf-8")
-
-    parts: list[bytes] = []
-    parts.append(b"MELD")
-    parts.append(struct.pack("<I", 1))
-    parts.append(struct.pack("<I", len(meta_bytes)))
-    parts.append(struct.pack("<I", int(pulse.shape[0])))
-    parts.append(struct.pack("<I", int(pulse.shape[1])))
-    parts.append(meta_bytes)
-    parts.append(pulse.astype("<f4", copy=False).tobytes(order="C"))
-    return b"".join(parts)
+    return _pack_json_f32_payload(b"MELD", metadata, pulse)
 
 
 async def load_decomposition_binary(file: UploadFile) -> Response | dict[str, Any]:
@@ -258,15 +115,8 @@ async def load_decomposition_binary(file: UploadFile) -> Response | dict[str, An
 
 
 def load_decomposition_from_path(filepath: str) -> dict[str, Any]:
-    loaded = load_decomposition_file(filepath)
-    signal_ctx = load_decomposition_signal_context(filepath)
-    if signal_ctx:
-        loaded["edit_signal_token"] = _store_edit_signal_context(
-            signal_ctx,
-            Path(filepath).name,
-        )
     file_label = Path(filepath).name
-    loaded["file_label"] = file_label
+    loaded = _init_loaded_decomp(filepath, file_label)
 
     bids_root = _infer_bids_root_from_decomp_path(filepath)
     if bids_root is not None:
@@ -339,35 +189,8 @@ def _dedup(
     )
 
 
-def _normalize_flagged(raw: Any, nmu: int) -> list[bool]:
-    if not isinstance(raw, (list, tuple)):
-        return [False] * nmu
-    out = [bool(v) for v in raw[:nmu]]
-    if len(out) < nmu:
-        out.extend([False] * (nmu - len(out)))
-    return out
 
-
-def _generate_mu_uids(mu_grid_index: list[int]) -> list[str]:
-    counts: dict[int, int] = {}
-    uids: list[str] = []
-    for grid_idx in mu_grid_index:
-        count = counts.get(grid_idx, 0)
-        uids.append(f"g{grid_idx}_mu{count}")
-        counts[grid_idx] = count + 1
-    return uids
-
-
-def _normalize_mu_grid_index(raw: Any, nmu: int) -> list[int]:
-    if not isinstance(raw, (list, tuple)):
-        return [0] * nmu
-    vals = [int(x) for x in raw[:nmu]]
-    if len(vals) < nmu:
-        vals.extend([0] * (nmu - len(vals)))
-    return vals
-
-
-def save_edits(payload: dict[str, Any]):
+def save_edits(payload: dict[str, Any]) -> dict[str, Any]:
     distimes_raw = payload.get("distimes") or payload.get("discharge_times") or []
     distimes = normalize_distimes(distimes_raw)
     pulse_trains_raw = payload.get("pulse_trains")
@@ -459,16 +282,16 @@ def save_edits(payload: dict[str, Any]):
     decomp_dir = base_dir / "decomp"
     decomp_dir.mkdir(parents=True, exist_ok=True)
     out_path = decomp_dir / f"{entity_label}_edited.npz"
-    _save_npz(
+    _save_npz_with_app_schema(
         out_path,
-        pulse_trains,
-        distimes,
-        fsamp,
-        grid_names,
-        mu_grid_index,
-        muscle_names,
-        parameters,
-        total_samples,
+        pulse_trains=pulse_trains,
+        distimes=distimes,
+        fsamp=fsamp,
+        grid_names=grid_names,
+        mu_grid_index=mu_grid_index,
+        muscles=muscle_names,
+        parameters=parameters,
+        total_samples=total_samples,
     )
     _save_editlog(out_path.with_suffix(".json"), mu_uids, edit_history, artifact_times_all or None)
     return make_json_safe({"saved": True, "path": str(out_path)})
@@ -496,6 +319,8 @@ def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
     if peeloff_win <= 0:
         peeloff_win = 0.025
     use_peeloff = bool(payload.get("use_peeloff", False))
+    flagged_raw = payload.get("flagged") or []
+    flagged = [bool(f) for f in flagged_raw] if flagged_raw else []
 
     view_start = as_int(payload.get("view_start"), "view_start", default=0)
     view_end = as_int(payload.get("view_end"), "view_end", default=0)
@@ -568,6 +393,7 @@ def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
     artifact_times = [int(x) for x in artifact_times_raw if isinstance(x, (int, float))]
 
     bids_emg_offset = view_start if bids_root and emg is not None else 0
+    lock_spikes = bool(payload.get("lock_spikes", False))
     pt, updated = update_motor_unit_filter_window(
         emg,
         emg_mask,
@@ -579,12 +405,15 @@ def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
         peeloff_spike_times=[
             distimes[i]
             for i in range(len(distimes))
-            if i != mu_index and mu_grid_index[i] == grid_index
+            if i != mu_index
+            and mu_grid_index[i] == grid_index
+            and not (i < len(flagged) and flagged[i])
         ],
         peeloff_win=peeloff_win,
         emg_offset=bids_emg_offset,
         use_peeloff=use_peeloff,
         artifact_times=artifact_times or None,
+        lock_spikes=lock_spikes,
     )
 
     pulse_train = payload.get("pulse_train")
@@ -637,11 +466,7 @@ def add_spikes(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def add_artifact(payload: dict[str, Any]) -> dict[str, Any]:
-    """Mark a peak in the ROI as an artifact for the selected motor unit.
-
-    The artifact peak is excluded from filter recomputation; its signal is
-    subtracted (peel-off style) when update_filter is subsequently called.
-    """
+    """Mark a peak in the ROI as an artifact for the selected motor unit."""
     pulse_train = payload.get("pulse_train")
     if pulse_train is None:
         raise HTTPException(status_code=400, detail="pulse_train is required")
@@ -729,7 +554,7 @@ def remove_duplicates_service(payload: dict[str, Any]) -> dict[str, Any]:
     distimes_raw = payload.get("distimes") or []
     distimes = normalize_distimes(distimes_raw)
     if not distimes:
-        return make_json_safe({"kept_indices": [], "distimes": [], "pulse_trains": []})
+        return make_json_safe({"kept_indices": [], "distimes": []})
 
     fsamp_raw = payload.get("fsamp")
     fsamp = float(fsamp_raw) if fsamp_raw is not None else None
@@ -737,34 +562,20 @@ def remove_duplicates_service(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="fsamp is required for deduplication")
 
     total_samples = as_int(payload.get("total_samples"), "total_samples", default=0)
+    if total_samples <= 0:
+        total_samples = max((max(d) for d in distimes if d), default=0) + 1
     parameters = payload.get("parameters") or {}
-    mu_grid_index = _normalize_mu_grid_index(payload.get("mu_grid_index"), len(distimes))
 
-    pulse_trains_raw = payload.get("pulse_trains")
-    pulse_trains: np.ndarray | None = None
-    if pulse_trains_raw is not None:
-        try:
-            pulse_trains = np.array(pulse_trains_raw, dtype=float)
-        except (TypeError, ValueError):
-            pulse_trains = None
-    if (
-        pulse_trains is None
-        or pulse_trains.ndim != 2
-        or pulse_trains.shape[0] != len(distimes)
-    ):
-        if total_samples <= 0:
-            total_samples = max((max(d) for d in distimes if d), default=0) + 1
-        pulse_trains = build_pulse_trains_from_distimes(distimes, total_samples)
+    pulse_trains = build_pulse_trains_from_distimes(distimes, total_samples)
 
     if len(distimes) <= 1:
         return make_json_safe({
             "kept_indices": list(range(len(distimes))),
             "distimes": distimes,
-            "pulse_trains": pulse_trains.tolist(),
         })
 
     dup_tol = float(parameters.get("duplicatesthresh", 0.3))
-    dedup_pulses, dedup_distimes, kept_idx = _dedup(pulse_trains, distimes, dup_tol, fsamp)
+    _, dedup_distimes, kept_idx = _dedup(pulse_trains, distimes, dup_tol, fsamp)
     dedup_distimes_clean = [
         sorted({int(v) for v in np.asarray(d, dtype=int).tolist() if int(v) >= 0})
         for d in dedup_distimes
@@ -772,7 +583,6 @@ def remove_duplicates_service(payload: dict[str, Any]) -> dict[str, Any]:
     return make_json_safe({
         "kept_indices": kept_idx,
         "distimes": dedup_distimes_clean,
-        "pulse_trains": dedup_pulses.tolist() if dedup_pulses.size else [],
         "removed_count": len(distimes) - len(kept_idx),
     })
 

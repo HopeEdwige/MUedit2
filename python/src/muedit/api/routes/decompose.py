@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from typing import Any
 
-from muedit.api.common import parse_discard_channels
+from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi.responses import Response, StreamingResponse
+
+from muedit.api.common import parse_discard_channels, safe_unlink
 from muedit.api.contracts import success_payload
 from muedit.api.services.decompose_service import (
-    cleanup_temp_file,
     decomposition_event_stream,
     fetch_decompose_preview_binary,
     parse_stream_options,
@@ -28,7 +29,7 @@ async def decompose(
     discard_channels: str | None = Form(None),
     full_preview: bool = Form(False),
     upload_token: str | None = Form(None),
-):
+) -> dict[str, Any]:
     """Run decomposition once and return a non-streamed summary + preview payload."""
     tmp_path, run_path, preloaded_signal, file_label = await resolve_decompose_input(
         file, upload_token
@@ -48,7 +49,8 @@ async def decompose(
             )
         )
     finally:
-        cleanup_temp_file(tmp_path)
+        if tmp_path:
+            safe_unlink(tmp_path)
 
 
 @router.post("/decompose_stream")
@@ -68,7 +70,7 @@ async def decompose_stream(
     bids_metadata: str | None = Form(None),
     full_preview: bool = Form(False),
     upload_token: str | None = Form(None),
-):
+) -> StreamingResponse:
     """Run decomposition and stream stage/progress events as NDJSON."""
     tmp_path, run_path, preloaded_signal, file_label = await resolve_decompose_input(
         file, upload_token
@@ -98,13 +100,13 @@ async def decompose_stream(
         file_label=file_label,
         include_full_preview=full_preview,
         preloaded_signal=preloaded_signal,
-        cleanup=cleanup_temp_file,
+        cleanup=safe_unlink,
         binary_preview=wants_binary_preview,
     )
     return StreamingResponse(generator, media_type="application/x-ndjson")
 
 
 @router.get("/decompose_preview/{token}")
-async def decompose_preview_binary(token: str):
+async def decompose_preview_binary(token: str) -> Response:
     """Fetch a cached binary preview blob referenced by stream token."""
     return fetch_decompose_preview_binary(token)
