@@ -1,0 +1,35 @@
+{
+  "mu_uids": [
+    "g0_mu0",
+    "g0_mu1",
+    "g0_mu2",
+    "g0_mu3",
+    "g0_mu4",
+    "g0_mu5",
+    "g0_mu6",
+    "g0_mu7",
+    "g0_mu8",
+    "g0_mu9",
+    "g0_mu10",
+    "g0_mu11",
+    "g0_mu12",
+    "g0_mu13",
+    "g0_mu14",
+    "g0_mu15"
+  ],
+  "history": [
+    {
+      "type": "remove_outliers",
+      "mu_uid": "g0_mu15",
+      "spikes_removed": [
+        61802,
+        88820,
+        89328,
+        149344,
+        155008,
+        159684
+      ],
+      "timestamp": "2026-05-04T13:33:07.631Z"
+    }
+  ]
+}
