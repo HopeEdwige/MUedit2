@@ -9,6 +9,9 @@
     "Description": "n/a"
   },
   "SoftwareFilters": "n/a",
+  "Muscles": [
+    "Mariam_Chawki_SNR_15"
+  ],
   "EMGChannelCount": 64,
   "BIDSVersion": "1.10.0",
   "RecordingDuration": 5.0
