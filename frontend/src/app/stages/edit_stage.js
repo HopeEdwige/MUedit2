@@ -19,8 +19,10 @@ import {
 import {
   renderEditExplorer as renderEditExplorerFeature,
   renderInstantaneousDr as renderInstantaneousDrFeature,
+  renderEditTimeline as renderEditTimelineFeature,
   bindEditCanvas as bindEditCanvasFeature,
   bindEditDrCanvas as bindEditDrCanvasFeature,
+  bindEditTimeline as bindEditTimelineFeature,
 } from "../../view/edit_canvas.js";
 import {
   saveEditedFile as saveEditedFileFeature,
@@ -37,6 +39,8 @@ import {
   setEditBidsRoot,
   setEditCurrentMu,
   setEditCurrentMuGrid,
+  setEditBookmark,
+  setShowBookmark,
 } from "../../state/actions.js";
 import { getEditMuIndicesForGrid } from "../../state/selectors.js";
 
@@ -182,7 +186,9 @@ export function createEditStageService(deps) {
       renderEditDropdowns,
       getDisplayPulse,
       renderInstantaneousDr,
+      getCanvasPlotMetrics,
     });
+    renderEditTimelineFeature({ els, state, COLORS, getDisplayPulse });
   }
 
   function restoreEditBackup() {
@@ -204,6 +210,8 @@ export function createEditStageService(deps) {
         setEditStatus,
         ensureEditFlagged,
         setEditMode,
+        setEditBookmark,
+        setShowBookmark,
         recomputeEditDirty,
         renderEditExplorer,
         appendEditHistory,
@@ -226,6 +234,8 @@ export function createEditStageService(deps) {
         backupEditMu,
         buildEntityLabelFromSession,
         ensureEditFlagged,
+        setEditBookmark,
+        setShowBookmark,
         recomputeEditDirty,
         refreshEditTotals,
         renderEditExplorer,
@@ -307,6 +317,8 @@ export function createEditStageService(deps) {
       getRawPulse,
       backupEditMu,
       ensureEditFlagged,
+      setEditBookmark,
+      setShowBookmark,
       recomputeEditDirty,
       renderEditExplorer,
       appendEditHistory,
@@ -322,6 +334,8 @@ export function createEditStageService(deps) {
       getRawPulse,
       backupEditMu,
       ensureEditFlagged,
+      setEditBookmark,
+      setShowBookmark,
       recomputeEditDirty,
       renderEditExplorer,
       appendEditHistory,
@@ -344,6 +358,8 @@ export function createEditStageService(deps) {
       apiJson,
       setEditStatus,
       ensureEditFlagged,
+      setEditBookmark,
+      setShowBookmark,
       recomputeEditDirty,
       renderEditExplorer,
       appendEditHistory,
@@ -373,6 +389,7 @@ export function createEditStageService(deps) {
       addArtifactInSelection,
       deleteSpikesInSelection,
       setEditMode,
+      setShowBookmark,
     });
   }
 
@@ -384,6 +401,15 @@ export function createEditStageService(deps) {
       getEditTotalSamples,
       renderEditExplorer,
       deleteDrInSelection,
+    });
+  }
+
+  function bindEditTimeline() {
+    bindEditTimelineFeature({
+      els,
+      state,
+      getDisplayPulse,
+      renderEditExplorer,
     });
   }
 
@@ -450,6 +476,7 @@ export function createEditStageService(deps) {
     renderInstantaneousDr,
     bindEditCanvas,
     bindEditDrCanvas,
+    bindEditTimeline,
     requestRoiEdit,
     requestFilterUpdate,
     updateMuFilter,
@@ -483,6 +510,7 @@ export function setupEditEvents(deps) {
     DEFAULT_BIDS_ROOT,
     bindEditCanvas,
     bindEditDrCanvas,
+    bindEditTimeline,
     renderEditExplorer,
     runEditAction,
     saveEditedFile,
@@ -500,6 +528,7 @@ export function setupEditEvents(deps) {
 
   bindEditCanvas();
   bindEditDrCanvas();
+  bindEditTimeline();
 
   if (els.editBidsRoot && !els.editBidsRoot.value.trim()) {
     els.editBidsRoot.value = DEFAULT_BIDS_ROOT;

@@ -47,6 +47,7 @@ import {
   setEditBidsRoot,
   setEditMode,
   setMuscle as setMuscleAction,
+  setShowBookmark,
 } from "../state/actions.js";
 import { getCurrentGrid as getCurrentGridSelector } from "../state/selectors.js";
 import { createUiService } from "./services/ui.js";
@@ -261,6 +262,7 @@ function handleKeyboardNavigation(e) {
       getViewForStageFn: getViewForStage,
       adjustViewFn: adjustView,
       setViewForStageFn: setViewForStage,
+      setShowBookmark: setShowBookmark,
     },
     e,
   );
@@ -320,6 +322,8 @@ runStage = createRunStageService({
   populateAuxSelector: () => qcStage.populateAuxSelector(),
   renderAuxiliaryChannels: () => qcStage.renderAuxiliaryChannels(),
   enableRoiSelection: (...args) => qcStage.enableRoiSelection(...args),
+  loadDecompositionForEditByPath: (path) =>
+    editStage.loadDecompositionForEditByPath(path),
 });
 
 qcStage = createQcStageService({
@@ -426,6 +430,7 @@ function wireEvents() {
     DEFAULT_BIDS_ROOT,
     bindEditCanvas: () => editStage.bindEditCanvas(),
     bindEditDrCanvas: () => editStage.bindEditDrCanvas(),
+    bindEditTimeline: () => editStage.bindEditTimeline(),
     renderEditExplorer: () => editStage.renderEditExplorer(),
     runEditAction: ui.runEditAction,
     saveEditedFile: () => editStage.saveEditedFile(),
