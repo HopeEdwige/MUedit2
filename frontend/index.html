@@ -6,7 +6,7 @@
     <title>MUedit</title>
     <link rel="icon" href="data:," />
     <link rel="shortcut icon" href="data:," />
-    <link rel="stylesheet" href="style.css?v=52" />
+    <link rel="stylesheet" href="style.css?v=57" />
   </head>
 
   <body>
@@ -158,16 +158,16 @@
                   />
                 </div>
                 <div class="form-row">
-                  <label for="editBidsRoot">BIDS root path</label>
+                  <label for="bidsProject">Project</label>
                   <input
                     type="text"
-                    id="editBidsRoot"
-                    placeholder="/path/to/bids_root"
+                    id="bidsProject"
+                    placeholder="e.g. study1 (leave empty for muedit_out)"
                   />
                 </div>
                 <div class="form-row">
                   <label for="bidsSubject">Subject</label>
-                  <input type="text" id="bidsSubject" value="01" />
+                  <input type="number" id="bidsSubject" value="1" min="1" />
                 </div>
                 <div class="form-row">
                   <label for="bidsTask">Task</label>
@@ -188,11 +188,11 @@
                 </div>
                 <div class="form-row">
                   <label for="bidsSession">Session</label>
-                  <input type="number" id="bidsSession" value="01" min="1" />
+                  <input type="number" id="bidsSession" value="1" min="1" />
                 </div>
                 <div class="form-row">
                   <label for="bidsRun">Run</label>
-                  <input type="number" id="bidsRun" value="01" min="1" />
+                  <input type="number" id="bidsRun" value="1" min="1" />
                 </div>
                 <div id="bidsMuscleContainer">
                   <div class="form-row">
@@ -549,27 +549,6 @@
                             </button>
                             <button
                               class="pill-toggle icon-expand-btn"
-                              id="editDeleteSpikeBtn"
-                              type="button"
-                            >
-                              <svg
-                                xmlns="http://www.w3.org/2000/svg"
-                                fill="none"
-                                viewBox="0 0 24 24"
-                                stroke-width="1.5"
-                                stroke="currentColor"
-                                aria-hidden="true"
-                              >
-                                <path
-                                  stroke-linecap="round"
-                                  stroke-linejoin="round"
-                                  d="M15 12H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
-                                />
-                              </svg>
-                              <span>Delete Spike</span>
-                            </button>
-                            <button
-                              class="pill-toggle icon-expand-btn"
                               id="editAddArtifactBtn"
                               type="button"
                               title="Mark a peak as an artifact — it will be subtracted when updating the filter"
@@ -589,6 +568,27 @@
                                 />
                               </svg>
                               <span>Add Artifact</span>
+                            </button>
+                            <button
+                              class="pill-toggle icon-expand-btn"
+                              id="editDeleteSpikeBtn"
+                              type="button"
+                            >
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                fill="none"
+                                viewBox="0 0 24 24"
+                                stroke-width="1.5"
+                                stroke="currentColor"
+                                aria-hidden="true"
+                              >
+                                <path
+                                  stroke-linecap="round"
+                                  stroke-linejoin="round"
+                                  d="M15 12H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
+                                />
+                              </svg>
+                              <span>Delete Spike/Artifact</span>
                             </button>
                           </div>
                           <div class="edit-toolbar-group">
@@ -711,7 +711,7 @@
                     </div>
                     <p class="hint muted">
                       Shortcuts: `<`/`>` previous-next MU, `R` remove outliers,
-                      `A` add spikes, `D` delete spikes, `X` add artifact, `Space` update filter,
+                      `A` add spikes, `X` add artifact, `D` delete spikes/artifacts, `Space` update filter,
                       `P` toggle peel-off, `L` toggle lock spikes,
                       `←`/`→` scroll, `↑`/`↓` zoom.
                     </p>
@@ -722,22 +722,27 @@
                     ></span>
                   </div>
                 </div>
-                <div class="chart-card glass edit-full">
+                <div class="chart-card glass edit-full" id="editDrCard">
                   <div class="chart-title">Firing Rate (Hz)</div>
                   <canvas
                     id="editDrCanvas"
-                    height="180"
+                    height="280"
                     class="mu-canvas muted-bg"
                   ></canvas>
                 </div>
-                <div class="chart-card glass edit-full">
-                  <div class="chart-title">Pulse Train (Interactive)</div>
+                <div class="chart-card glass edit-full" id="editPulseCard">
+                  <div class="chart-title">Pulse Train</div>
                   <canvas
                     id="editPulseCanvas"
-                    height="200"
+                    height="280"
                     class="mu-canvas"
                   ></canvas>
                 </div>
+                <canvas
+                  id="editTimelineCanvas"
+                  class="edit-timeline-canvas"
+                  aria-label="Navigation timeline"
+                ></canvas>
               </div>
             </div>
           </div>

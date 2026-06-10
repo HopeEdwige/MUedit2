@@ -20,17 +20,6 @@ SpikeTimes: TypeAlias = list[int]
 FilterUpdateResult: TypeAlias = tuple[np.ndarray | None, SpikeTimes]
 
 
-def _remove_high_amplitude_outliers(
-    pulse_train: np.ndarray, spike_indices: np.ndarray
-) -> np.ndarray:
-    """Drop candidate spikes with unusually large amplitudes."""
-    if spike_indices.size == 0:
-        return spike_indices
-    threshold = np.mean(pulse_train[spike_indices]) + 3 * np.std(
-        pulse_train[spike_indices]
-    )
-    return spike_indices[pulse_train[spike_indices] <= threshold]
-
 
 def _recompute_spikes_in_window(
     emg: np.ndarray,
@@ -109,7 +98,7 @@ def _recompute_spikes_in_window(
         return None, spike_times
     idx2 = int(np.argmax(centroids))
     spikes_new = peaks[labels == idx2]
-    spikes_new = _remove_high_amplitude_outliers(pt, spikes_new)
+    spikes_new = spikes_new[pt[spikes_new] <= 3 * centroids[idx2]]
 
     spikes_new = spikes_new.astype(int)
     
@@ -223,7 +212,7 @@ def delete_spikes_in_roi(
     updated = []
     ordered = sorted(spike_times)
     low = min(y_min, y_max)
-    high = max(y_min, y_max)
+    high = max(y_min, y_max) + 1
     for t in ordered:
         if t < x_start or t > x_end:
             updated.append(int(t))
@@ -234,6 +223,31 @@ def delete_spikes_in_roi(
             continue
         updated.append(int(t))
     return sorted({int(x) for x in updated})
+
+
+def delete_artifacts_in_roi(
+    pulse: np.ndarray,
+    artifact_times: SpikeTimes,
+    x_start: int,
+    x_end: int,
+    y_min: float,
+    y_max: float,
+) -> SpikeTimes:
+    """Delete artifacts inside ROI when amplitude is within the selected range."""
+    updated = []
+    ordered = sorted(artifact_times)
+    low = min(y_min, y_max)
+    high = max(y_min, y_max) + 1
+    for t in ordered:
+        if t < x_start or t > x_end:
+            updated.append(int(t))
+            continue
+        val = pulse[t] if 0 <= t < len(pulse) else 0
+        in_box = low <= val <= high
+        if in_box:
+            continue
+        updated.append(int(t))
+    return sorted({int(x) for x in updated if x >= 0})
 
 
 def delete_high_discharge_rate_spikes_in_roi(

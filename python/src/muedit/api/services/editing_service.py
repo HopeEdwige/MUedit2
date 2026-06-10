@@ -23,12 +23,15 @@ from muedit.api.common import (
     safe_unlink,
     save_upload_to_temp,
 )
+from muedit.api.config import resolve_bids_root
 from muedit.api.services.bids_helpers import (
     _infer_bids_root_from_decomp_path,
     _load_bids_grid,
+    _parse_all_bids_entities,
     _parse_subject_session_from_entity_label,
     _read_bids_channels_sidecar,
 )
+from muedit.io.bids import export_bids_emg
 from muedit.api.services.edit_helpers import (
     _expected_grid_count,
     _generate_mu_uids,
@@ -48,6 +51,7 @@ from muedit.decomp.postprocess import _save_npz_with_app_schema
 from muedit.editing.operations import (
     add_artifact_in_roi,
     add_spikes_in_roi,
+    delete_artifacts_in_roi,
     delete_high_discharge_rate_spikes_in_roi,
     delete_spikes_in_roi,
     remove_discharge_rate_outliers,
@@ -118,9 +122,14 @@ def load_decomposition_from_path(filepath: str) -> dict[str, Any]:
     file_label = Path(filepath).name
     loaded = _init_loaded_decomp(filepath, file_label)
 
+    from muedit.api.config import DATA_ROOT
     bids_root = _infer_bids_root_from_decomp_path(filepath)
     if bids_root is not None:
-        loaded["bids_root"] = str(bids_root)
+        try:
+            rel = bids_root.relative_to(DATA_ROOT)
+            loaded["project"] = rel.parts[0] if rel.parts else ""
+        except ValueError:
+            loaded["project"] = ""
         try:
             entity_label = parse_entity_label(file_label)
             subject, session = _parse_subject_session_from_entity_label(entity_label)
@@ -188,6 +197,48 @@ def _dedup(
         fsamp,
     )
 
+
+
+def _export_bids_from_mat_context(
+    bids_root: Path,
+    entity_label: str,
+    edit_signal_token: str | None,
+    file_label: str | None,
+    fsamp: float | None,
+    grid_names: list[str],
+    muscle_names: list[str],
+    parameters: dict[str, Any],
+) -> dict[str, str] | None:
+    """Best-effort BIDS EMG export using the raw signal cached from a .mat load."""
+    ctx = _get_edit_signal_context(edit_signal_token) or _get_edit_signal_context_by_label(file_label)
+    if ctx is None:
+        return None  # non-MAT source or context expired
+
+    entities = _parse_all_bids_entities(entity_label)
+    try:
+        aux_data = ctx.get("aux_data")
+        aux_names = ctx.get("aux_names") or None
+        paths = export_bids_emg(
+            data=ctx["data"],
+            fsamp=float(fsamp or ctx["fsamp"]),
+            grid_names=ctx["grid_names"] or grid_names,
+            coordinates=ctx.get("coordinates") or [],
+            discard_channels=ctx["emgmask"],
+            bids_root=bids_root,
+            ied=ctx.get("ied"),
+            subject=entities["sub"] or "01",
+            task=entities["task"] or "task",
+            run=entities["run"],
+            session=entities["ses"],
+            acquisition=entities["acq"],
+            recording=entities["recording"],
+            target_muscle=muscle_names if len(muscle_names) > 1 else (muscle_names[0] if muscle_names else None),
+            aux_data=aux_data if isinstance(aux_data, np.ndarray) and aux_data.size > 0 else None,
+            aux_names=aux_names if aux_names else None,
+        )
+        return {k: str(v) for k, v in paths.items()}
+    except Exception:  # noqa: BLE001
+        return None  # never block the primary save on BIDS export error
 
 
 def save_edits(payload: dict[str, Any]) -> dict[str, Any]:
@@ -258,9 +309,13 @@ def save_edits(payload: dict[str, Any]) -> dict[str, Any]:
         mu_grid_index = [mu_grid_index[i] for i in keep_idx]
         mu_uids = [mu_uids[i] for i in keep_idx]
         pulse_trains = pulse_trains[keep_idx, :] if pulse_trains.size else pulse_trains
+        artifact_times_all = [artifact_times_all[i] for i in keep_idx if i < len(artifact_times_all)]
 
     if remove_duplicates and len(distimes) > 1 and fsamp and fsamp > 0:
-        dup_tol = float(parameters.get("duplicatesthresh", 0.3))
+        dup_tol_raw = parameters.get("duplicatesthresh", 0.3)
+        while isinstance(dup_tol_raw, (list, tuple, np.ndarray)):
+            dup_tol_raw = dup_tol_raw[0] if len(dup_tol_raw) > 0 else 0.3
+        dup_tol = float(dup_tol_raw)
         dedup_pulses, dedup_distimes, kept_idx = _dedup(pulse_trains, distimes, dup_tol, fsamp)
         pulse_trains = dedup_pulses if dedup_pulses.size else np.zeros((0, total_samples))
         distimes = [
@@ -269,14 +324,13 @@ def save_edits(payload: dict[str, Any]) -> dict[str, Any]:
         ]
         mu_grid_index = [mu_grid_index[i] for i in kept_idx]
         mu_uids = [mu_uids[i] for i in kept_idx]
+        artifact_times_all = [artifact_times_all[i] for i in kept_idx if i < len(artifact_times_all)]
 
-    bids_root = payload.get("bids_root")
-    if not bids_root:
-        raise HTTPException(status_code=400, detail="bids_root is required for edit save")
+    bids_root = resolve_bids_root(payload.get("project"))
     file_label = payload.get("file_label") or ""
     entity_label = payload.get("entity_label") or parse_entity_label(file_label)
     subject, session = _parse_subject_session_from_entity_label(entity_label)
-    base_dir = Path(bids_root) / f"sub-{subject}"
+    base_dir = bids_root / f"sub-{subject}"
     if session:
         base_dir = base_dir / f"ses-{session}"
     decomp_dir = base_dir / "decomp"
@@ -294,16 +348,27 @@ def save_edits(payload: dict[str, Any]) -> dict[str, Any]:
         total_samples=total_samples,
     )
     _save_editlog(out_path.with_suffix(".json"), mu_uids, edit_history, artifact_times_all or None)
-    return make_json_safe({"saved": True, "path": str(out_path)})
+    bids_paths = _export_bids_from_mat_context(
+        bids_root=bids_root,  # already a Path
+        entity_label=entity_label,
+        edit_signal_token=payload.get("edit_signal_token"),
+        file_label=file_label,
+        fsamp=fsamp,
+        grid_names=grid_names,
+        muscle_names=muscle_names,
+        parameters=parameters,
+    )
+    result: dict[str, Any] = {"saved": True, "path": str(out_path)}
+    if bids_paths:
+        result["bids_emg_paths"] = bids_paths
+    return make_json_safe(result)
 
 
 def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
-    bids_root = payload.get("bids_root")
+    bids_root = str(resolve_bids_root(payload.get("project")))
     edit_signal_token = payload.get("edit_signal_token")
     file_label = payload.get("file_label") or ""
-    entity_label = payload.get("entity_label")
-    if not entity_label and bids_root:
-        entity_label = parse_entity_label(file_label)
+    entity_label = payload.get("entity_label") or parse_entity_label(file_label)
     grid_index = as_int(payload.get("grid_index"), "grid_index", default=0)
     distimes = normalize_distimes(payload.get("distimes") or [])
     if not distimes:
@@ -331,12 +396,14 @@ def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
     emg: np.ndarray | None = None
     fsamp: float | None = None
     emg_mask: np.ndarray | None = None
+    emg_is_presliced = False  # True only when BIDS loaded a view-length slice
 
     if bids_root:
         try:
             emg, fsamp, emg_mask = _load_bids_grid(
                 Path(bids_root), str(entity_label), grid_index, view_start, view_end
             )
+            emg_is_presliced = True
         except (ValueError, FileNotFoundError):
             emg, fsamp, emg_mask = None, None, None
 
@@ -392,7 +459,7 @@ def update_filter(payload: dict[str, Any]) -> dict[str, Any]:
     artifact_times_raw = payload.get("artifact_times") or []
     artifact_times = [int(x) for x in artifact_times_raw if isinstance(x, (int, float))]
 
-    bids_emg_offset = view_start if bids_root and emg is not None else 0
+    bids_emg_offset = view_start if emg_is_presliced else 0
     lock_spikes = bool(payload.get("lock_spikes", False))
     pt, updated = update_motor_unit_filter_window(
         emg,
@@ -486,7 +553,7 @@ def add_artifact(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def delete_spikes(payload: dict[str, Any]) -> dict[str, Any]:
-    """Delete spikes in ROI for selected motor unit."""
+    """Delete spikes and artifacts in ROI for selected motor unit."""
     pulse_train = payload.get("pulse_train")
     if pulse_train is None:
         raise HTTPException(status_code=400, detail="pulse_train is required")
@@ -500,10 +567,24 @@ def delete_spikes(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="mu_index out of range")
 
     pulse = np.array(pulse_train, dtype=float)
-    updated = delete_spikes_in_roi(
+    updated_distimes = delete_spikes_in_roi(
         pulse, distimes[mu_index], x_start, x_end, y_min, y_max
     )
-    return make_json_safe({"distimes": updated})
+
+    # Also delete artifacts in the same ROI
+    updated_artifact_times = None
+    artifact_times_raw = payload.get("artifact_times")
+    if artifact_times_raw:
+        artifact_times = [int(x) for x in artifact_times_raw if isinstance(x, (int, float))]
+        if artifact_times:
+            updated_artifact_times = delete_artifacts_in_roi(
+                pulse, artifact_times, x_start, x_end, y_min, y_max
+            )
+
+    result = {"distimes": updated_distimes}
+    if updated_artifact_times is not None:
+        result["artifact_times"] = updated_artifact_times
+    return make_json_safe(result)
 
 
 def delete_dr(payload: dict[str, Any]) -> dict[str, Any]:

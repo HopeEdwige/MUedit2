@@ -122,7 +122,7 @@ export function resetEditState(deps) {
   const { state, els, refreshEditModeButtons } = deps;
   resetEditSlice(state);
   if (els.editSaveBtn) els.editSaveBtn.disabled = true;
-  if (els.editBidsRoot) els.editBidsRoot.value = "";
+  if (els.bidsProject) els.bidsProject.value = "";
   refreshEditModeButtons();
 }
 
@@ -241,6 +241,7 @@ export function deleteSpikesInSelection(deps, sel) {
     xEnd: end,
     yMin: low,
     yMax: high,
+    artifact_times: state.edit.artifactTimes?.[muIdx] || [],
   });
 }
 

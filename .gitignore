@@ -7,10 +7,6 @@ Thumbs.db
 .idea/
 *.iml
 
-# ── Claude Code ─────────────────────────────────────────────────────────────
-.claude/
-CLAUDE.md
-
 # ── Python ─────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
@@ -54,11 +50,23 @@ frontend/node_modules/
 *.otb+
 *.npz
 
-# ── BIDS output directories ────────────────────────────────────────────────
+# ── BIDS output directories ────────────────────────────────────────────────────────────────
 bids_out/
 bids_export/
 data/datasamples/
+<<<<<<< HEAD
 emg-2/ 
 *.mp4 
 
 /Mat Files/
+=======
+emg-2/
+*.mp4
+/Mat Files/
+
+# ── Data subfolders ────────────────────────────────────────────────────────
+data/*/
+
+# ── Local test scripts and outputs ─────────────────────────────────────────
+tests/
+>>>>>>> 0297ea3e54f1b0623df840957e9fff2fb76a0ab2
