@@ -42,14 +42,20 @@ python/*.log
 # ── Frontend ────────────────────────────────────────────────────────────────
 frontend/node_modules/
 
+<<<<<<< HEAD
 # ── EMG data files (large binaries — store on Figshare or similar) ─────────
 
+=======
+# ── EMG data files ──────────────────────────────────────────────────────────
+*.mat
+>>>>>>> f4e910af83c8abdd12185e1f97aac69463b3b20a
 *.bdf
 *.edf
 *.otb4
 *.otb+
 *.npz
 
+<<<<<<< HEAD
 # ── BIDS output directories ────────────────────────────────────────────────
 bids_out/
 bids_export/
@@ -58,3 +64,10 @@ emg-2/
 *.mp4 
 
 /Mat Files/
+=======
+# ── Data subfolders ────────────────────────────────────────────────────────
+data/*/
+
+# ── Local test scripts and outputs ─────────────────────────────────────────
+tests/
+>>>>>>> f4e910af83c8abdd12185e1f97aac69463b3b20a
