@@ -52,7 +52,7 @@ frontend/.prettierignore
 frontend/package-lock.json
 
 # ── EMG data files (large binaries — store on Figshare or similar) ─────────
-*.mat
+
 *.bdf
 *.edf
 *.otb4
@@ -63,6 +63,12 @@ frontend/package-lock.json
 bids_out/
 bids_export/
 data/datasamples/
+<<<<<<< HEAD
+emg-2/ 
+*.mp4 
+
+/Mat Files/
+=======
 emg-2/
 *.mp4
 /Mat Files/
@@ -72,3 +78,4 @@ data/*/
 
 # ── Local test scripts and outputs ─────────────────────────────────────────
 tests/
+>>>>>>> 0297ea3e54f1b0623df840957e9fff2fb76a0ab2
