@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from muedit.decomp.io import LOADER_BIDS_META_KEYS
 from muedit.models import SignalImport
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024
@@ -184,7 +185,6 @@ def _moving_average_ms(series: np.ndarray, fsamp: float, window_ms: float) -> np
     return np.convolve(x, kernel, mode="same").astype(np.float32)
 
 
-
 def _store_decomp_preview_binary(payload: bytes) -> str:
     """Store binary decompose-preview payload and return short-lived token."""
     token = uuid.uuid4().hex
@@ -219,15 +219,30 @@ def _store_edit_signal_context(context: dict[str, Any], file_label: str | None =
     data = np.asarray(context.get("data"), dtype=np.float32)
     emgmask_raw = context.get("emgmask") or []
     emgmask = [np.asarray(m, dtype=int).copy() for m in emgmask_raw]
+    coordinates_raw = context.get("coordinates") or []
+    coordinates = [np.asarray(c, dtype=float).copy() for c in coordinates_raw]
+    ied_raw = context.get("ied")
+    ied = list(ied_raw) if ied_raw is not None else None
+    aux_raw = context.get("aux_data")
+    aux_data = np.asarray(aux_raw, dtype=np.float32).copy() if isinstance(aux_raw, np.ndarray) and aux_raw.size > 0 else None
+    aux_names = list(context.get("aux_names") or [])
+    cache_entry: dict[str, Any] = {
+        "data": data.copy(),
+        "fsamp": float(context.get("fsamp") or 0.0),
+        "grid_names": list(context.get("grid_names") or []),
+        "emgmask": emgmask,
+        "coordinates": coordinates,
+        "ied": ied,
+        "aux_data": aux_data,
+        "aux_names": aux_names,
+        "expires_at": time.time() + EDIT_SIGNAL_CONTEXT_TTL_SEC,
+    }
+    # Loader-provided BIDS metadata fields (single source: LOADER_BIDS_META_KEYS).
+    for key in LOADER_BIDS_META_KEYS:
+        cache_entry[key] = context.get(key)
     with _CACHE_LOCK:
         _purge_expired_caches_locked()
-        _EDIT_SIGNAL_CONTEXT_CACHE[token] = {
-            "data": data.copy(),
-            "fsamp": float(context.get("fsamp") or 0.0),
-            "grid_names": list(context.get("grid_names") or []),
-            "emgmask": emgmask,
-            "expires_at": time.time() + EDIT_SIGNAL_CONTEXT_TTL_SEC,
-        }
+        _EDIT_SIGNAL_CONTEXT_CACHE[token] = cache_entry
         label = str(file_label or "").strip()
         if label:
             _EDIT_SIGNAL_LABEL_INDEX[label] = token
@@ -245,12 +260,20 @@ def _get_edit_signal_context(token: str | None) -> dict[str, Any] | None:
         if not entry:
             return None
         entry["expires_at"] = time.time() + EDIT_SIGNAL_CONTEXT_TTL_SEC
-        return {
+        aux = entry.get("aux_data")
+        result: dict[str, Any] = {
             "data": np.asarray(entry["data"], dtype=np.float32).copy(),
             "fsamp": float(entry["fsamp"]),
             "grid_names": list(entry["grid_names"]),
             "emgmask": [np.asarray(m, dtype=int).copy() for m in entry["emgmask"]],
+            "coordinates": [np.asarray(c, dtype=float).copy() for c in (entry.get("coordinates") or [])],
+            "ied": list(entry["ied"]) if entry.get("ied") is not None else None,
+            "aux_data": np.asarray(aux, dtype=np.float32).copy() if isinstance(aux, np.ndarray) else None,
+            "aux_names": list(entry.get("aux_names") or []),
         }
+        for key in LOADER_BIDS_META_KEYS:
+            result[key] = entry.get(key)
+        return result
 
 
 def _get_edit_signal_context_by_label(file_label: str | None) -> dict[str, Any] | None:

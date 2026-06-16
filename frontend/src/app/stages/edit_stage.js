@@ -19,8 +19,10 @@ import {
 import {
   renderEditExplorer as renderEditExplorerFeature,
   renderInstantaneousDr as renderInstantaneousDrFeature,
+  renderEditTimeline as renderEditTimelineFeature,
   bindEditCanvas as bindEditCanvasFeature,
   bindEditDrCanvas as bindEditDrCanvasFeature,
+  bindEditTimeline as bindEditTimelineFeature,
 } from "../../view/edit_canvas.js";
 import {
   saveEditedFile as saveEditedFileFeature,
@@ -34,9 +36,11 @@ import {
 } from "../services/editing_service.js";
 import {
   appendEditHistoryEntry,
-  setEditBidsRoot,
+  setEditProject,
   setEditCurrentMu,
   setEditCurrentMuGrid,
+  setEditBookmark,
+  setShowBookmark,
 } from "../../state/actions.js";
 import { getEditMuIndicesForGrid } from "../../state/selectors.js";
 
@@ -53,7 +57,6 @@ export function createEditStageService(deps) {
     getSuggestedNpzName,
     persistNpzBySaveTarget,
     getBidsMuscleNames,
-    getBidsRoot,
     buildEntityLabelFromSession,
     applySessionInfoFromDecomposition,
     showWorkspace,
@@ -62,7 +65,6 @@ export function createEditStageService(deps) {
     setEditStatus,
     setEditMode,
     refreshEditModeButtons,
-    inferBidsRootFromSelectedPath,
     renderBidsMuscleFields,
   } = deps;
 
@@ -88,7 +90,10 @@ export function createEditStageService(deps) {
   }
 
   function appendEditHistory(entry) {
-    appendEditHistoryEntry(state, { ...entry, timestamp: new Date().toISOString() });
+    appendEditHistoryEntry(state, {
+      ...entry,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   function getEditTotalSamples() {
@@ -182,7 +187,9 @@ export function createEditStageService(deps) {
       renderEditDropdowns,
       getDisplayPulse,
       renderInstantaneousDr,
+      getCanvasPlotMetrics,
     });
+    renderEditTimelineFeature({ els, state, COLORS, getDisplayPulse });
   }
 
   function restoreEditBackup() {
@@ -204,6 +211,8 @@ export function createEditStageService(deps) {
         setEditStatus,
         ensureEditFlagged,
         setEditMode,
+        setEditBookmark,
+        setShowBookmark,
         recomputeEditDirty,
         renderEditExplorer,
         appendEditHistory,
@@ -221,11 +230,12 @@ export function createEditStageService(deps) {
         API_BASE,
         apiJson,
         setEditStatus,
-        getBidsRoot,
         getRawPulse,
         backupEditMu,
         buildEntityLabelFromSession,
         ensureEditFlagged,
+        setEditBookmark,
+        setShowBookmark,
         recomputeEditDirty,
         refreshEditTotals,
         renderEditExplorer,
@@ -307,6 +317,8 @@ export function createEditStageService(deps) {
       getRawPulse,
       backupEditMu,
       ensureEditFlagged,
+      setEditBookmark,
+      setShowBookmark,
       recomputeEditDirty,
       renderEditExplorer,
       appendEditHistory,
@@ -322,6 +334,8 @@ export function createEditStageService(deps) {
       getRawPulse,
       backupEditMu,
       ensureEditFlagged,
+      setEditBookmark,
+      setShowBookmark,
       recomputeEditDirty,
       renderEditExplorer,
       appendEditHistory,
@@ -344,6 +358,8 @@ export function createEditStageService(deps) {
       apiJson,
       setEditStatus,
       ensureEditFlagged,
+      setEditBookmark,
+      setShowBookmark,
       recomputeEditDirty,
       renderEditExplorer,
       appendEditHistory,
@@ -373,6 +389,7 @@ export function createEditStageService(deps) {
       addArtifactInSelection,
       deleteSpikesInSelection,
       setEditMode,
+      setShowBookmark,
     });
   }
 
@@ -384,6 +401,15 @@ export function createEditStageService(deps) {
       getEditTotalSamples,
       renderEditExplorer,
       deleteDrInSelection,
+    });
+  }
+
+  function bindEditTimeline() {
+    bindEditTimelineFeature({
+      els,
+      state,
+      getDisplayPulse,
+      renderEditExplorer,
     });
   }
 
@@ -424,9 +450,6 @@ export function createEditStageService(deps) {
 
   function loadDecompositionForEditByPath(path) {
     const name = path.split("/").pop().split("\\").pop() || path;
-    const bidsRoot = inferBidsRootFromSelectedPath(path);
-    if (els.editBidsRoot) els.editBidsRoot.value = bidsRoot;
-    setEditBidsRoot(state, bidsRoot);
     return loadDecompositionForEdit({ name }, path);
   }
 
@@ -450,6 +473,7 @@ export function createEditStageService(deps) {
     renderInstantaneousDr,
     bindEditCanvas,
     bindEditDrCanvas,
+    bindEditTimeline,
     requestRoiEdit,
     requestFilterUpdate,
     updateMuFilter,
@@ -480,9 +504,9 @@ export function setupEditEvents(deps) {
   const {
     els,
     state,
-    DEFAULT_BIDS_ROOT,
     bindEditCanvas,
     bindEditDrCanvas,
+    bindEditTimeline,
     renderEditExplorer,
     runEditAction,
     saveEditedFile,
@@ -500,11 +524,7 @@ export function setupEditEvents(deps) {
 
   bindEditCanvas();
   bindEditDrCanvas();
-
-  if (els.editBidsRoot && !els.editBidsRoot.value.trim()) {
-    els.editBidsRoot.value = DEFAULT_BIDS_ROOT;
-    setEditBidsRoot(state, DEFAULT_BIDS_ROOT);
-  }
+  bindEditTimeline();
 
   els.editMuGridSelect?.addEventListener("change", (e) => {
     const idx = Number(e.target.value) || 0;
@@ -542,7 +562,10 @@ export function setupEditEvents(deps) {
     };
     applyPeelOff(els.editPeelOffToggle, false);
     els.editPeelOffToggle.addEventListener("click", () => {
-      applyPeelOff(els.editPeelOffToggle, els.editPeelOffToggle.dataset.state !== "on");
+      applyPeelOff(
+        els.editPeelOffToggle,
+        els.editPeelOffToggle.dataset.state !== "on",
+      );
     });
   }
   if (els.editLockSpikesToggle) {
@@ -558,7 +581,10 @@ export function setupEditEvents(deps) {
     };
     applyLockSpikes(els.editLockSpikesToggle, false);
     els.editLockSpikesToggle.addEventListener("click", () => {
-      applyLockSpikes(els.editLockSpikesToggle, els.editLockSpikesToggle.dataset.state !== "on");
+      applyLockSpikes(
+        els.editLockSpikesToggle,
+        els.editLockSpikesToggle.dataset.state !== "on",
+      );
     });
   }
   els.editOutliersBtn?.addEventListener("click", () => {
@@ -580,14 +606,22 @@ export function setupEditEvents(deps) {
     setEditMode("add", "Drag a box on pulse train to add spikes");
   });
   els.editAddArtifactBtn?.addEventListener("click", () => {
-    setEditMode("add_artifact", "Drag a box on pulse train to mark an artifact");
+    setEditMode(
+      "add_artifact",
+      "Drag a box on pulse train to mark an artifact",
+    );
   });
   els.editDeleteSpikeBtn?.addEventListener("click", () => {
     setEditMode("delete_spikes", "Drag a box on pulse train to delete spikes");
   });
 
-  els.editBidsRoot?.addEventListener("input", (e) => {
-    setEditBidsRoot(state, e.target.value);
+  els.bidsProject?.addEventListener("input", (e) => {
+    setEditProject(state, e.target.value);
+  });
+
+  els.bidsPlacementScheme?.addEventListener("change", (e) => {
+    const row = els.bidsPlacementDescRow;
+    if (row) row.classList.toggle("hidden", e.target.value !== "Other");
   });
 
   refreshEditModeButtons();

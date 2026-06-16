@@ -1,3 +1,5 @@
+import { createEditSlice } from "../app/state.js";
+
 export function setCurrentGrid(state, idx) {
   state.currentGrid = Math.max(0, idx || 0);
 }
@@ -8,7 +10,14 @@ export function ensureDiscardMasks(state) {
     !state.discardMasks ||
     state.discardMasks.length !== state.channelMeans.length
   ) {
-    state.discardMasks = state.channelMeans.map((cm) => cm.map(() => 0));
+    const badPerGrid = state.metadata?.bad_channels_per_grid;
+    state.discardMasks = state.channelMeans.map((cm, gridIdx) => {
+      const bad = badPerGrid?.[gridIdx];
+      if (Array.isArray(bad) && bad.length === cm.length) {
+        return bad.map((v) => (v === 1 ? 1 : 0));
+      }
+      return cm.map(() => 0);
+    });
   }
 }
 
@@ -40,8 +49,8 @@ export function setRunCurrentMu(state, idx, { resetView = true } = {}) {
   if (resetView) state.runView = null;
 }
 
-export function setEditBidsRoot(state, value) {
-  state.edit.bidsRoot = String(value || "").trim();
+export function setEditProject(state, value) {
+  state.edit.project = String(value || "").trim();
 }
 
 export function setEditSignalToken(state, value) {
@@ -274,11 +283,21 @@ export function popLastEditHistoryEntryForMu(state, muUid) {
 
 export function clearEditHistoryForMu(state, muUid) {
   if (!Array.isArray(state.edit.editHistory)) return;
-  state.edit.editHistory = state.edit.editHistory.filter((e) => e.mu_uid !== muUid);
+  state.edit.editHistory = state.edit.editHistory.filter(
+    (e) => e.mu_uid !== muUid,
+  );
 }
 
 export function setEditBackup(state, backup) {
   state.edit.backup = backup || null;
+}
+
+export function setEditBookmark(state, position) {
+  state.edit.bookmarkPosition = position || null;
+}
+
+export function setShowBookmark(state, show) {
+  state.edit.showBookmark = !!show;
 }
 
 export function setEditDirty(state, dirty) {
@@ -302,35 +321,7 @@ export function setEditDrDraftSelection(state, selection) {
 }
 
 export function resetEditSlice(state) {
-  state.edit = {
-    file: null,
-    filename: "",
-    pulseTrains: [],
-    originalPulseTrains: [],
-    distimes: [],
-    originalDistimes: [],
-    artifactTimes: [],
-    gridNames: [],
-    muGridIndex: [],
-    fsamp: null,
-    totalSamples: 0,
-    currentMuGrid: 0,
-    currentMu: 0,
-    view: null,
-    selectionPulse: null,
-    selectionDr: null,
-    draftSelectionPulse: null,
-    draftSelectionDr: null,
-    mode: null,
-    dirty: false,
-    parameters: null,
-    flagged: [],
-    backup: null,
-    bidsRoot: "",
-    editSignalToken: "",
-    muUids: [],
-    editHistory: [],
-  };
+  state.edit = createEditSlice();
 }
 
 export function setRunDownloadInFlight(state, inFlight) {

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "muedit"
-version = "2.0.0"
+version = "2.1.0"
 description = "FastICA-based Motor Unit decomposition of High-Density EMG signals"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -30,11 +30,13 @@ dependencies = [
   "pydantic>=2.10",
   "PyYAML>=6.0",
   "h5py>=3.12",
+  "tk",
   "fastapi>=0.115",
   "uvicorn>=0.32",
   "python-multipart>=0.0.12",
   "pyedflib>=0.1.36",
-  "torch>=2.5",
+  "jupyterlab>=4.0",
+  "ipykernel>=6.29",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +45,7 @@ dev = [
   "twine>=5.1",
   "pytest>=8.3",
   "ruff>=0.8",
+  "optuna>=4.3",
 ]
 
 [project.scripts]

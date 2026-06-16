@@ -1,5 +1,5 @@
 import {
-  autoDownloadRunDecomposition as autoDownloadRunDecompositionFeature,
+  autoSaveRunDecomposition as autoSaveRunDecompositionFeature,
   runDecomposition as runDecompositionFeature,
   handleStreamMessage as handleStreamMessageFeature,
 } from "../../decomp/run.js";
@@ -24,12 +24,11 @@ export function createRunStageService(deps) {
     els,
     API_BASE,
     apiFetch,
-    COLORS,
     drawSeries,
     drawGridOverlay,
     getSuggestedNpzName,
     persistNpzBySaveTarget,
-    getBidsRoot,
+    getBidsProject,
     getBidsMuscleNames,
     buildParams,
     updateStartAvailability,
@@ -46,6 +45,7 @@ export function createRunStageService(deps) {
     populateAuxSelector,
     renderAuxiliaryChannels,
     enableRoiSelection,
+    loadDecompositionForEditByPath,
   } = deps;
 
   function getMuIndicesForGrid(gridIdx) {
@@ -86,14 +86,15 @@ export function createRunStageService(deps) {
     renderMuExplorerController({ els, drawSeries }, model);
   }
 
-  function autoDownloadRunDecomposition() {
-    return autoDownloadRunDecompositionFeature({
+  function autoSaveRunDecomposition() {
+    return autoSaveRunDecompositionFeature({
       state,
       els,
       getSuggestedNpzName,
       persistNpzBySaveTarget,
       getBidsMuscleNames,
       setStatus,
+      onSaved: loadDecompositionForEditByPath || null,
     });
   }
 
@@ -118,7 +119,7 @@ export function createRunStageService(deps) {
         populateAuxSelector,
         renderAuxiliaryChannels,
         enableRoiSelection,
-        autoDownloadRunDecomposition,
+        autoSaveRunDecomposition,
       },
       msg,
     );
@@ -130,7 +131,7 @@ export function createRunStageService(deps) {
       els,
       API_BASE,
       apiFetch,
-      getBidsRoot,
+      getBidsProject,
       getBidsMuscleNames,
       buildParams,
       updateStartAvailability,
@@ -145,7 +146,7 @@ export function createRunStageService(deps) {
     getMuIndicesForGrid,
     renderMuDropdowns,
     renderMuExplorer,
-    autoDownloadRunDecomposition,
+    autoSaveRunDecomposition,
     handleStreamMessage,
     runDecomposition,
   };
@@ -180,7 +181,7 @@ export function setupRunEvents(deps) {
 
   if (els.nwindows) {
     els.nwindows.addEventListener("change", (e) => {
-      const nwin = Number(els.nwindows.value) ?? 1;
+      const nwin = Number(els.nwindows.value) || 1;
       syncRois(nwin);
       refreshVisuals();
       e.target.blur();

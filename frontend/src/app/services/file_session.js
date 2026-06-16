@@ -1,11 +1,8 @@
-import { DEFAULT_BIDS_ROOT } from "../../config.js";
-
 export function createFileSessionService(deps) {
   const { els } = deps;
 
-  function getBidsRoot() {
-    const fromInput = (els.editBidsRoot?.value || "").trim();
-    return fromInput || DEFAULT_BIDS_ROOT;
+  function getBidsProject() {
+    return (els.bidsProject?.value || "").trim();
   }
 
   function getBidsMuscleNames() {
@@ -47,42 +44,66 @@ export function createFileSessionService(deps) {
     return "unsupported";
   }
 
-  function inferBidsRootFromSelectedPath(filePath) {
-    const rawPath = String(filePath || "");
-    const normalized = rawPath.replace(/\\/g, "/");
-    const parts = normalized.split("/");
-    const subIndex = parts.findIndex((p) => /^sub-[^/]+$/i.test(p));
-
-    if (subIndex > 0) {
-      const root = parts.slice(0, subIndex).join("/");
-      if (root) return root;
-    }
-
-    const marker = "/muedit_out";
-    const markerIndex = normalized.toLowerCase().lastIndexOf(marker);
-    if (markerIndex >= 0) {
-      return normalized.slice(0, markerIndex + marker.length);
-    }
-
-    const lastSep = Math.max(rawPath.lastIndexOf("/"), rawPath.lastIndexOf("\\"));
-    const dir = lastSep >= 0 ? rawPath.substring(0, lastSep) : ".";
-    const sep = rawPath.includes("/") ? "/" : "\\";
-    return dir + sep + "muedit_out";
-  }
-
   function setUploadLoading(active) {
     if (!els.uploadLoader) return;
     els.uploadLoader.classList.toggle("hidden", !active);
   }
 
+  // Raw BIDS entity inputs (subject/task/session/run) used to compose the
+  // entity label. Returned untransformed so the caller owns label assembly.
+  function getBidsEntityInputs() {
+    return {
+      subject: els.bidsSubject?.value,
+      task: els.bidsTask?.value,
+      session: els.bidsSession?.value,
+      run: els.bidsRun?.value,
+    };
+  }
+
+  // Gather the participant + hardware BIDS form fields into the snake_case
+  // shape the /edit/save endpoint expects, ready to spread into the request
+  // body. Keeps all save-form DOM reads here rather than in the orchestrator.
+  function getBidsSaveFields() {
+    const age = String(els.bidsParticipantAge?.value || "").trim();
+    const sex = String(els.bidsParticipantSex?.value || "").trim();
+    const handedness = String(
+      els.bidsParticipantHandedness?.value || "",
+    ).trim();
+    const participantMeta =
+      age || sex || handedness
+        ? {
+            age: age || "n/a",
+            sex: sex || "n/a",
+            handedness: handedness || "n/a",
+          }
+        : null;
+
+    return {
+      project: getBidsProject(),
+      participant_meta: participantMeta,
+      powerline_freq: Number(els.bidsPowerlineFreq?.value || 50),
+      manufacturer: String(els.bidsManufacturer?.value || "").trim() || null,
+      manufacturers_model_name:
+        String(els.bidsDeviceModel?.value || "").trim() || null,
+      placement_scheme: String(
+        els.bidsPlacementScheme?.value || "ChannelSpecific",
+      ),
+      placement_scheme_description:
+        String(els.bidsPlacementDescription?.value || "").trim() || null,
+      task_description:
+        String(els.bidsTaskDescription?.value || "").trim() || null,
+    };
+  }
+
   return {
-    getBidsRoot,
+    getBidsProject,
     getBidsMuscleNames,
+    getBidsEntityInputs,
+    getBidsSaveFields,
     clearUploadFormatError,
     showUnsupportedUploadFormatError,
     isSupportedSignalFile,
     detectLandingFileType,
-    inferBidsRootFromSelectedPath,
     setUploadLoading,
   };
 }

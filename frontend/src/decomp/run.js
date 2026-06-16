@@ -20,7 +20,7 @@ import {
 import { decodeDecomposePreviewPayload } from "../api/binary_payloads.js";
 import { normalizePreviewPayload } from "../api/payloads.js";
 
-export async function autoDownloadRunDecomposition(deps) {
+export async function autoSaveRunDecomposition(deps) {
   const {
     state,
     els,
@@ -28,6 +28,7 @@ export async function autoDownloadRunDecomposition(deps) {
     persistNpzBySaveTarget,
     getBidsMuscleNames,
     setStatus,
+    onSaved,
   } = deps;
 
   if (state.runDownloadInFlight) return;
@@ -69,6 +70,9 @@ export async function autoDownloadRunDecomposition(deps) {
         : "Decomposition saved",
       "success",
     );
+    if (onSaved && saved?.path) {
+      onSaved(saved.path);
+    }
   } catch (err) {
     console.error(err);
     setStatus(`Save failed: ${err.message}`, "error");
@@ -83,7 +87,7 @@ export async function runDecomposition(deps) {
     els,
     API_BASE,
     apiFetch,
-    getBidsRoot,
+    getBidsProject,
     getBidsMuscleNames,
     buildParams,
     updateStartAvailability,
@@ -129,12 +133,12 @@ export async function runDecomposition(deps) {
       formData.append("rois", JSON.stringify(state.rois));
     }
 
-    const bidsRoot =
-      typeof getBidsRoot === "function"
-        ? String(getBidsRoot() || "").trim()
+    const project =
+      typeof getBidsProject === "function"
+        ? String(getBidsProject() || "").trim()
         : "";
-    if (bidsRoot) {
-      formData.append("bids_root", bidsRoot);
+    if (project) {
+      formData.append("project", project);
     }
     const bidsEntities = {};
     const subject = String(els.bidsSubject?.value || "").trim();
@@ -148,6 +152,21 @@ export async function runDecomposition(deps) {
     const muscleNames =
       typeof getBidsMuscleNames === "function" ? getBidsMuscleNames() : [];
     if (muscleNames.length) bidsEntities.target_muscle = muscleNames;
+    const powerlineFreq = Number(els.bidsPowerlineFreq?.value || 50);
+    if (powerlineFreq) bidsEntities.powerline_freq = powerlineFreq;
+    const manufacturer = String(els.bidsManufacturer?.value || "").trim();
+    if (manufacturer) bidsEntities.manufacturer = manufacturer;
+    const deviceModel = String(els.bidsDeviceModel?.value || "").trim();
+    if (deviceModel) bidsEntities.manufacturers_model_name = deviceModel;
+    const placementScheme = String(els.bidsPlacementScheme?.value || "").trim();
+    if (placementScheme) bidsEntities.placement_scheme = placementScheme;
+    const placementDesc = String(
+      els.bidsPlacementDescription?.value || "",
+    ).trim();
+    if (placementDesc)
+      bidsEntities.placement_scheme_description = placementDesc;
+    const taskDescription = String(els.bidsTaskDescription?.value || "").trim();
+    if (taskDescription) bidsEntities.task_description = taskDescription;
     if (Object.keys(bidsEntities).length) {
       formData.append("bids_entities", JSON.stringify(bidsEntities));
     }
@@ -419,6 +438,7 @@ export function handleStreamMessage(deps, msg) {
     populateAuxSelector,
     renderAuxiliaryChannels,
     enableRoiSelection,
+    autoSaveRunDecomposition,
   } = deps;
 
   if (msg.stage === "error") {
@@ -525,9 +545,8 @@ export function handleStreamMessage(deps, msg) {
 
   if (msg.stage === "done") {
     if (Array.isArray(state.muPulseTrains) && state.muPulseTrains.length) {
-      // Finalize explorer selection/render after stream completion so the first
-      // detected MU is shown immediately when at least one MU exists.
       renderMuExplorer();
+      void autoSaveRunDecomposition?.();
     }
     setStatus("Complete", "success");
   }
