@@ -30,6 +30,7 @@ class DecompositionParameters:
     adapt_batch_ms: int = 1000
     adapt_wh: bool = True
     adapt_sv: bool = True
+    full_trace: bool = False
 
 
 @dataclass

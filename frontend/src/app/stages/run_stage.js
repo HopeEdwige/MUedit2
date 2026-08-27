@@ -192,6 +192,7 @@ export function setupRunEvents(deps) {
     toggleConditional("peelOffSettings", on),
   );
   setupToggle(els.useAdaptiveToggle);
+  setupToggle(els.fullTraceToggle);
   setupToggle(els.covToggle, (on) => toggleConditional("covSettings", on));
   setupLockedOnToggle(els.silToggle, (on) =>
     toggleConditional("silSettings", on),

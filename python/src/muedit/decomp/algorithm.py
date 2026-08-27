@@ -23,7 +23,7 @@ def extend_signal(signal: np.ndarray, exfactor: int) -> np.ndarray:
     esample = np.zeros((extended_rows, extended_cols))
 
     for m in range(exfactor):
-        esample[m * rows:(m + 1) * rows, m:cols + m] = signal
+        esample[m * rows : (m + 1) * rows, m : cols + m] = signal
 
     return esample
 
@@ -44,9 +44,7 @@ def pca_extended_signal(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     max_last_eig = np.sum(eigenvalues > rank_tolerance)
     if 0 < max_last_eig < signal.shape[0]:
-        lower_limit_value = (
-            eigenvalues[max_last_eig - 1] + eigenvalues[max_last_eig]
-        ) / 2
+        lower_limit_value = (eigenvalues[max_last_eig - 1] + eigenvalues[max_last_eig]) / 2
     else:
         lower_limit_value = rank_tolerance
 
@@ -141,7 +139,9 @@ def get_spikes(
     if len(spikes) <= 1:
         return icasig, np.asarray(spikes, dtype=int)
 
-    centroids, labels = kmeans2(icasig[spikes], 2, iter=_KMEANS_ITER, minit="++", missing="raise", seed=0)
+    centroids, labels = kmeans2(
+        icasig[spikes], 2, iter=_KMEANS_ITER, minit="++", missing="raise", seed=0
+    )
     idx2 = int(np.argmax(centroids))
     spikes2 = spikes[labels == idx2]
 
@@ -197,8 +197,9 @@ def compute_silhouette(
     if len(spikes) <= 1:
         return icasig, np.array(spikes, dtype=int), 0.0
 
-
-    centroids, labels = kmeans2(icasig[spikes], 2, iter=_KMEANS_ITER, minit="++", missing="raise", seed=0)
+    centroids, labels = kmeans2(
+        icasig[spikes], 2, iter=_KMEANS_ITER, minit="++", missing="raise", seed=0
+    )
 
     idx2 = int(np.argmax(centroids))
     other_idx = 1 - idx2
@@ -253,7 +254,7 @@ def subtract_mu_waveforms(
     # Extract all segments at once: (n_rows, n_spikes, window_size)
     offsets = np.arange(-window_l, window_l + 1, dtype=int)
     idx = valid_spikes[:, None] + offsets[None, :]  # (n_spikes, window_size)
-    waveforms = x[:, idx].mean(axis=1)              # (n_rows, window_size)
+    waveforms = x[:, idx].mean(axis=1)  # (n_rows, window_size)
 
     # Scatter-add: stamp mean waveform at each spike position.
     # Loop is over n_spikes (~80), not n_rows (~1024) — each iteration is a
@@ -272,8 +273,16 @@ def batch_process_filters(
     ltime: int,
     fsamp: float,
     nwindows_per_grid: int,
+    whiten_mat_by_window: dict[int, np.ndarray] | None = None,
+    full_extended_by_window: dict[int, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
-    """Apply MU filters across windows and reconstruct pulse trains/spike times."""
+    """Apply MU filters across windows and reconstruct pulse trains/spike times.
+
+    When ``full_extended_by_window`` and ``whiten_mat_by_window`` are provided,
+    each filter is dewhitened (``w @ W``) and projected onto the full extended
+    signal of its window, producing pulse trains over the entire trace instead
+    of only the decomposed windows.
+    """
     total_mus = 0
     for nwin in mu_filters_by_window:
         if mu_filters_by_window[nwin].size > 0:
@@ -296,24 +305,31 @@ def batch_process_filters(
         for j in range(n_filters):
             current_filter = filters[:, j]
 
-            for nwin2 in whitened_windows:
-                if nwin2 // max(1, nwindows_per_grid) != grid_idx:
-                    continue
-                start = coordinates[nwin2 * 2]
-                segment_len = whitened_windows[nwin2].shape[1]
-                pt_segment = np.dot(current_filter, whitened_windows[nwin2])
-                if start + segment_len <= ltime:
-                    pulse_t[mu_nb, start : start + segment_len] = pt_segment
-                else:
-                    valid_len = ltime - start
-                    pulse_t[mu_nb, start:ltime] = pt_segment[:valid_len]
+            if full_extended_by_window is not None and whiten_mat_by_window is not None:
+                w_dewhite = current_filter @ whiten_mat_by_window[nwin]
+                pt_full = w_dewhite @ full_extended_by_window[nwin]
+                pulse_t[mu_nb, :ltime] = pt_full[:ltime]
+            else:
+                for nwin2 in whitened_windows:
+                    if nwin2 // max(1, nwindows_per_grid) != grid_idx:
+                        continue
+                    start = coordinates[nwin2 * 2]
+                    segment_len = whitened_windows[nwin2].shape[1]
+                    pt_segment = np.dot(current_filter, whitened_windows[nwin2])
+                    if start + segment_len <= ltime:
+                        pulse_t[mu_nb, start : start + segment_len] = pt_segment
+                    else:
+                        valid_len = ltime - start
+                        pulse_t[mu_nb, start:ltime] = pt_segment[:valid_len]
 
             pulse_t[mu_nb, :] = pulse_t[mu_nb, :] * np.abs(pulse_t[mu_nb, :])
             distance = int(np.round(fsamp * _MIN_ISI_SEC))
             spikes, _ = find_peaks(pulse_t[mu_nb, :], distance=distance)
 
             if len(spikes) > 1:
-                centroids, labels = kmeans2(pulse_t[mu_nb, spikes], 2, iter=10, minit="++", missing="raise", seed=0)
+                centroids, labels = kmeans2(
+                    pulse_t[mu_nb, spikes], 2, iter=10, minit="++", missing="raise", seed=0
+                )
                 idx = np.argmax(centroids)
                 distime.append(spikes[labels == idx])
             else:
@@ -395,9 +411,7 @@ def rem_duplicates(
                 if corr_val > best_corr:
                     best_corr = corr_val
                     best_lag = lag
-            aligned_target = (
-                target_expanded + best_lag if best_corr > 0.2 else target_expanded
-            )
+            aligned_target = target_expanded + best_lag if best_corr > 0.2 else target_expanded
             common = np.intersect1d(ref_expanded, aligned_target)
             if len(common) > 0:
                 common = np.sort(common)
@@ -411,11 +425,7 @@ def rem_duplicates(
             len_ref = len(distime[i])
             len_target = len(distime[j])
 
-            score = (
-                n_common / max(len_ref, len_target)
-                if max(len_ref, len_target) > 0
-                else 0
-            )
+            score = n_common / max(len_ref, len_target) if max(len_ref, len_target) > 0 else 0
             if score >= tol:
                 duplicates.append(j)
 

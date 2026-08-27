@@ -148,6 +148,12 @@ def run_decomposition_cli() -> None:
         help="Enable/disable adaptive mode (app setting: Use adaptive).",
     )
     parser.add_argument(
+        "--full-trace",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply MU filters over the full EMG trace instead of only the decomposed windows.",
+    )
+    parser.add_argument(
         "--bids-root",
         type=str,
         default=None,
@@ -203,9 +209,7 @@ def run_decomposition_cli() -> None:
             ]
         )
         if not sample_candidates:
-            parser.error(
-                "No input filepath provided and no sample file found in data/datasamples."
-            )
+            parser.error("No input filepath provided and no sample file found in data/datasamples.")
         full_path = sample_candidates[0]
         file_label = full_path.name
 
@@ -253,6 +257,7 @@ def run_decomposition_cli() -> None:
         peel_off_enabled=args.peel_off,
         peel_off_win=args.peel_off_window_ms / 1000.0,
         use_adaptive=args.use_adaptive,
+        full_trace=args.full_trace,
     )
 
     run_decomposition(

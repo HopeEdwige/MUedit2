@@ -15,6 +15,7 @@ from muedit.decomp.algorithm import (
     DEDUP_JITTER,
     DEDUP_MAXLAG_RATIO,
     batch_process_filters,
+    extend_signal,
     rem_duplicates,
 )
 from muedit.decomp.preview import build_preview_payload
@@ -27,6 +28,7 @@ from muedit.decomp.types import (
 )
 from muedit.io.bids import build_entities
 from muedit.models import DecompositionExport, DecompositionSignalExport
+from muedit.signal.filters import demean
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +117,7 @@ def _save_npz_with_app_schema(
         payload.update(extras)
     np.savez_compressed(out_path, **payload)
 
-    
+
 def postprocess_step(
     prep: PreprocessStepOutput,
     decomposed: DecomposeStepOutput,
@@ -157,6 +159,24 @@ def postprocess_step(
             adapt_sv=params.adapt_sv,
         )
     else:
+        full_extended_by_window: dict[int, np.ndarray] | None = None
+        if params.full_trace:
+            full_extended_by_window = {}
+            ch_idx_g = 0
+            grid_full_ext: dict[int, np.ndarray] = {}
+            for i in range(prep.ngrid):
+                mask = np.array(prep.discard_channels[i]).astype(int)
+                n_ch_g = mask.size
+                keep_idx = np.where(mask == 0)[0]
+                grid_raw = prep.data[ch_idx_g + keep_idx, :]
+                ex_factor = int(round(params.nbextchan / max(1, grid_raw.shape[0])))
+                grid_full_ext[i] = demean(extend_signal(grid_raw, ex_factor))
+                ch_idx_g += n_ch_g
+            for nwin in decomposed.mu_filters:
+                grid_idx = nwin // max(1, nwindows)
+                full_extended_by_window[nwin] = grid_full_ext[grid_idx]
+            logger.info("Applying MU filters over the full trace (dewhitened).")
+
         pulse_t, distime = batch_process_filters(
             decomposed.mu_filters,
             decomposed.w_sig,
@@ -164,6 +184,8 @@ def postprocess_step(
             prep.data.shape[1],
             prep.fsamp,
             nwindows,
+            whiten_mat_by_window=decomposed.whiten_mat if full_extended_by_window else None,
+            full_extended_by_window=full_extended_by_window,
         )
 
     pulse_t, distime, mu_grid_index = _remove_duplicates_by_grid(

@@ -85,6 +85,7 @@ function buildParams(isToggleOn) {
   const nwindows = Number(els.nwindows?.value) || 1;
   const peelOn = isToggleOn(els.peelOffToggle);
   const adaptiveOn = isToggleOn(els.useAdaptiveToggle);
+  const fullTraceOn = isToggleOn(els.fullTraceToggle);
   const covOn = isToggleOn(els.covToggle);
   const silOn = isToggleOn(els.silToggle);
   const peelWindow = Number(els.peelOffWindow?.value) || 25;
@@ -106,6 +107,7 @@ function buildParams(isToggleOn) {
     peel_off_enabled: peelOn ? 1 : 0,
     peel_off_win: peelWindow / 1000,
     use_adaptive: adaptiveOn ? 1 : 0,
+    full_trace: fullTraceOn ? 1 : 0,
   };
 }
 

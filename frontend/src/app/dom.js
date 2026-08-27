@@ -33,6 +33,7 @@ export const els = {
   nwindows: document.getElementById("nwindows"),
   peelOffToggle: document.getElementById("peelOffToggle"),
   useAdaptiveToggle: document.getElementById("useAdaptiveToggle"),
+  fullTraceToggle: document.getElementById("fullTraceToggle"),
   peelOffSettings: document.getElementById("peelOffSettings"),
   peelOffWindow: document.getElementById("peelOffWindow"),
   covToggle: document.getElementById("covToggle"),
