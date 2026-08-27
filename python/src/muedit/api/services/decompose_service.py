@@ -138,7 +138,7 @@ def decomposition_event_stream(
                 duration=duration,
                 manual_roi=False,
                 params=param_obj,
-                save_npz=persist_output,
+                save_npz=persist_output or bids_root is not None,
                 progress_cb=progress,
                 roi=roi,
                 rois=rois,
@@ -249,5 +249,3 @@ def parse_stream_options(
         parse_json_object(bids_entities, "bids_entities"),
         parse_json_object(bids_metadata, "bids_metadata"),
     )
-
-

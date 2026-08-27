@@ -26,7 +26,6 @@ from muedit.decomp.types import (
     PostprocessStepOutput,
     PreprocessStepOutput,
 )
-from muedit.io.bids import build_entities
 from muedit.models import DecompositionExport, DecompositionSignalExport
 from muedit.signal.filters import demean
 
@@ -122,11 +121,9 @@ def postprocess_step(
     prep: PreprocessStepOutput,
     decomposed: DecomposeStepOutput,
     params: DecompositionParameters,
-    bids_root: str | None,
-    bids_entities: dict[str, Any] | None,
     progress_cb: Callable[[str, dict[str, Any]], None] | None,
 ) -> PostprocessStepOutput:
-    """Batch filters, remove duplicates, and optionally save BIDS decomposition output."""
+    """Batch filters and remove duplicates."""
     logger.info("Batch processing...")
     if progress_cb:
         progress_cb("progress", {"message": "Batch processing filters", "pct": 92})
@@ -196,37 +193,6 @@ def postprocess_step(
         params,
         prep.fsamp,
     )
-
-    if bids_root and pulse_t.size > 0:
-        subj = (bids_entities or {}).get("subject", "01")
-        sess = (bids_entities or {}).get("session")
-        entity_label = build_entities(
-            subject=subj,
-            task=(bids_entities or {}).get("task", "task"),
-            run=(bids_entities or {}).get("run"),
-            session=sess,
-            acquisition=(bids_entities or {}).get("acquisition"),
-            recording=(bids_entities or {}).get("recording"),
-        )
-        decomp_dir = Path(bids_root) / "derivatives" / "muedit" / f"sub-{subj}"
-        if sess:
-            decomp_dir = decomp_dir / f"ses-{sess}"
-        decomp_dir = decomp_dir / "decomp"
-        decomp_dir.mkdir(parents=True, exist_ok=True)
-        out_path = decomp_dir / f"{entity_label}_decomp.npz"
-        _save_npz_with_app_schema(
-            out_path,
-            pulse_trains=pulse_t,
-            distimes=distime,
-            fsamp=prep.fsamp,
-            grid_names=prep.grid_names,
-            mu_grid_index=mu_grid_index,
-            muscles=prep.muscles,
-            parameters=asdict(params),
-            total_samples=prep.data.shape[1],
-            extras={"adaptive_losses": np.array([adaptive_losses], dtype=object)},
-        )
-        logger.info("Saved combined decomposition to %s", out_path)
 
     if progress_cb:
         progress_cb("progress", {"message": "Finalizing output", "pct": 97})

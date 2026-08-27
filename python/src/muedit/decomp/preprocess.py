@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from muedit.decomp.types import DecompositionParameters, LoadStepOutput, PreprocessStepOutput
-from muedit.io.bids import export_bids_emg
+from muedit.io.bids import build_entities, export_bids_emg, resolve_bids_emg_path
 from muedit.io.factory import clone_signal, load_signal
 from muedit.signal.filters import bandpass_signals, notch_signals
 from muedit.signal.grid import format_hdemg_signal
@@ -155,7 +155,7 @@ def _apply_grid_bandpass_filters(
         )
         ch_idx += n_channels_grid
 
-        
+
 def _export_raw_emg_bids(
     bids_root: str | None,
     bids_entities: dict[str, Any] | None,
@@ -224,7 +224,8 @@ def _export_raw_emg_bids(
         aux_low_cutoff=loader_meta.get("aux_hpf"),
         aux_high_cutoff=loader_meta.get("aux_lpf"),
         manufacturer=entities.get("manufacturer") or loader_meta.get("manufacturer"),
-        manufacturers_model_name=entities.get("manufacturers_model_name") or loader_meta.get("device_name"),
+        manufacturers_model_name=entities.get("manufacturers_model_name")
+        or loader_meta.get("device_name"),
         task_description=entities.get("task_description"),
         software_versions=loader_meta.get("software_versions"),
         skip_existing=skip_existing,
@@ -244,9 +245,7 @@ def load_step(
         progress_cb("start", {"message": "Loading signal", "pct": 5, "file": filename})
 
     signal = (
-        clone_signal(preloaded_signal)
-        if preloaded_signal is not None
-        else load_signal(filepath)
+        clone_signal(preloaded_signal) if preloaded_signal is not None else load_signal(filepath)
     )
     logger.info("Loaded data: %s, Fs=%s", signal["data"].shape, signal["fsamp"])
     return LoadStepOutput(
@@ -285,9 +284,7 @@ def preprocess_step(
 
     muscles = loaded.signal.get("muscle") or []
     loader_meta = loaded.signal.get("metadata", {})
-    default_target_muscle = next(
-        (m for m in muscles if isinstance(m, str) and m.strip()), None
-    )
+    default_target_muscle = next((m for m in muscles if isinstance(m, str) and m.strip()), None)
     derived_bids_metadata: dict[str, Any] = {}
     if muscles and any(isinstance(m, str) and m for m in muscles):
         derived_bids_metadata["Muscles"] = muscles
@@ -307,6 +304,19 @@ def preprocess_step(
         default_target_muscle=default_target_muscle,
         signal=loaded.signal,
     )
+
+    if bids_root:
+        entities = bids_entities or {}
+        entity_label = build_entities(
+            subject=entities.get("subject", "01"),
+            task=entities.get("task", "task"),
+            run=entities.get("run"),
+            session=entities.get("session"),
+            acquisition=entities.get("acquisition"),
+            recording=entities.get("recording"),
+        )
+        loader_meta["bids_entity_label"] = entity_label
+        loader_meta["bids_emg_path"] = str(resolve_bids_emg_path(Path(bids_root), entity_label))
 
     roi_list = _resolve_roi_list(data, loaded.fsamp, duration, manual_roi, roi, rois)
     ngrid = len(grid_names)
