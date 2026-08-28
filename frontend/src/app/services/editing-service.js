@@ -5,9 +5,10 @@
  * or transport coupling. State mutations go exclusively through the action
  * helpers imported from `state/actions.js`.
  */
-import { handleError } from "./error_service.js";
-import { decodeEditLoadPayload } from "../../api/binary_payloads.js";
+import { handleError } from "./error-service.js";
+import { decodeEditLoadPayload } from "../../api/binary-payloads.js";
 import { normalizeEditLoadPayload } from "../../api/payloads.js";
+import { routes } from "../../api/routes.js";
 import { inferGridCount, normalizeGridNames } from "../../io/grid.js";
 import {
   clearAllEditSelections,
@@ -87,7 +88,7 @@ export async function requestRoiEdit(deps, action, payload) {
   const isArtifact = action === "add-artifact";
   try {
     setEditStatus("Applying ROI...", "muted");
-    const data = await apiJson(`${API_BASE}/edit/${action}`, {
+    const data = await apiJson(`${API_BASE}${routes.editAction(action)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -229,7 +230,7 @@ export async function requestFilterUpdate(deps, mode) {
     backupEditMu();
     setEditStatus("Updating filter from BIDS EMG...", "muted");
     const data = await apiJson(
-      `${API_BASE}/edit/${mode}`,
+      `${API_BASE}${routes.editMode(mode)}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -317,7 +318,7 @@ export async function removeOutliers(deps) {
   }
   try {
     setEditStatus("Removing outliers...", "muted");
-    const data = await apiJson(`${API_BASE}/edit/remove-outliers`, {
+    const data = await apiJson(`${API_BASE}${routes.editRemoveOutliers}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -377,7 +378,7 @@ export async function removeDuplicateMus(deps) {
   }
   try {
     setEditStatus("Removing duplicates...", "muted");
-    const data = await apiJson(`${API_BASE}/edit/remove-duplicates`, {
+    const data = await apiJson(`${API_BASE}${routes.editRemoveDuplicates}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -483,7 +484,7 @@ export async function flagMuForDeletion(deps) {
   backupEditMu();
   try {
     setEditStatus("Flagging MU for deletion...", "muted");
-    const data = await apiJson(`${API_BASE}/edit/flag-mu`, {
+    const data = await apiJson(`${API_BASE}${routes.editFlagMu}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -613,7 +614,7 @@ export async function loadDecompositionForEdit(deps, file, filepath = null) {
     let data;
     if (filepath) {
       const res = await apiFetch(
-        `${API_BASE}/edit/load-by-path`,
+        `${API_BASE}${routes.editLoadByPath}`,
         {
           method: "POST",
           headers: {
@@ -631,7 +632,7 @@ export async function loadDecompositionForEdit(deps, file, filepath = null) {
       const formData = new FormData();
       formData.append("file", file);
       const res = await apiFetch(
-        `${API_BASE}/edit/load`,
+        `${API_BASE}${routes.editLoad}`,
         {
           method: "POST",
           headers: {},
@@ -647,7 +648,7 @@ export async function loadDecompositionForEdit(deps, file, filepath = null) {
       const formData = new FormData();
       formData.append("file", file);
       data = await apiJson(
-        `${API_BASE}/edit/load`,
+        `${API_BASE}${routes.editLoad}`,
         { method: "POST", body: formData },
         120000,
       );

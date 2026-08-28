@@ -17,8 +17,9 @@ import {
   setSeriesLength,
   setUploadToken,
 } from "../state/actions.js";
-import { decodeDecomposePreviewPayload } from "../api/binary_payloads.js";
+import { decodeDecomposePreviewPayload } from "../api/binary-payloads.js";
 import { normalizePreviewPayload } from "../api/payloads.js";
+import { routes } from "../api/routes.js";
 
 export async function autoSaveRunDecomposition(deps) {
   const {
@@ -181,7 +182,7 @@ export async function runDecomposition(deps) {
     try {
       // Preferred path: reuse upload token from preview to avoid re-uploading the raw file.
       response = await apiFetch(
-        `${API_BASE}/decompose_stream`,
+        `${API_BASE}${routes.decomposeStream}`,
         {
           method: "POST",
           headers: {},
@@ -196,7 +197,7 @@ export async function runDecomposition(deps) {
         setUploadToken(state, null);
         updateProgress(5, "Session expired, retrying with file upload...");
         response = await apiFetch(
-          `${API_BASE}/decompose_stream`,
+          `${API_BASE}${routes.decomposeStream}`,
           {
             method: "POST",
             headers: {},
@@ -396,7 +397,7 @@ async function hydrateBinaryDecomposePreview(deps) {
   const { apiFetch, API_BASE, token, applyPreview, onError } = deps;
   try {
     const res = await apiFetch(
-      `${API_BASE}/decompose_preview/${encodeURIComponent(token)}`,
+      `${API_BASE}${routes.decomposePreview(token)}`,
       {
         method: "GET",
         headers: { Accept: "application/octet-stream" },

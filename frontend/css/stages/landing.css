@@ -1,0 +1,121 @@
+/* ── Landing ── */
+
+.landing {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  padding: 60px 14px 40px;
+}
+
+.landing-top-row {
+  width: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.landing-card {
+  width: min(880px, 100%);
+  border-radius: 0;
+  padding: 0;
+  color: var(--text);
+  text-align: center;
+}
+
+.browse-icon-btn {
+  color: var(--text);
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.browse-icon-btn svg {
+  width: 30px;
+  height: 30px;
+}
+
+.browse-icon-btn:hover {
+  color: var(--accent);
+}
+
+.headline {
+  font-size: var(--fs-lg);
+  margin: 0;
+  font-weight: var(--fw-bold);
+}
+
+.hint {
+  margin-top: 14px;
+  font-size: var(--fs-md);
+  color: var(--muted);
+  font-weight: var(--fw-light);
+}
+
+.upload-format-error {
+  margin: 14px auto 0;
+  display: inline-block;
+  padding: 8px 12px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  color: var(--danger-text);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-regular);
+}
+
+.upload-loader {
+  margin: 14px auto 0;
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.upload-loader span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  animation: upload-bounce 0.8s ease-in-out infinite;
+}
+
+.upload-loader span:nth-child(1) {
+  background: var(--mu-1);
+  animation-delay: 0s;
+}
+
+.upload-loader span:nth-child(2) {
+  background: var(--mu-2);
+  animation-delay: 0.1s;
+}
+
+.upload-loader span:nth-child(3) {
+  background: var(--mu-3);
+  animation-delay: 0.2s;
+}
+
+.upload-loader span:nth-child(4) {
+  background: var(--mu-4);
+  animation-delay: 0.3s;
+}
+
+.upload-loader span:nth-child(5) {
+  background: var(--mu-5);
+  animation-delay: 0.4s;
+}
+
+@keyframes upload-bounce {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.75;
+  }
+  50% {
+    transform: translateY(-8px);
+    opacity: 1;
+  }
+}

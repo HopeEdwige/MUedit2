@@ -1,4 +1,5 @@
 import { parseBidsEntitiesFromLabel } from "../../io/bids.js";
+import { routes } from "../../api/routes.js";
 
 function inferProjectFromPath(fullPath) {
   const parts = fullPath.replace(/\\/g, "/").split("/");
@@ -29,7 +30,7 @@ export function createImportStageService(deps) {
 
     let result;
     try {
-      result = await apiJson(`${API_BASE}/dialog/open-file`);
+      result = await apiJson(`${API_BASE}${routes.dialogOpenFile}`);
     } catch (err) {
       console.error("File dialog failed:", err);
       setStatus("Failed to open file dialog", "error");

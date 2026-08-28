@@ -11,7 +11,7 @@ import {
   refreshVisuals as refreshVisualsController,
   enableRoiSelection as enableRoiSelectionController,
   renderChannelQC as renderChannelQCController,
-} from "../../view/qc_renderer.js";
+} from "../../view/qc-renderer.js";
 import {
   beginRawPreviewTransition,
   rollbackRawPreviewTransition,

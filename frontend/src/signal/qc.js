@@ -20,6 +20,12 @@ import {
   beginRawPreviewTransition,
   rollbackRawPreviewTransition,
 } from "../state/transitions.js";
+import {
+  isQcRawF32Payload,
+  decodeQcJsonPayload,
+  decodeQcRawF32,
+} from "../api/binary-payloads.js";
+import { routes } from "../api/routes.js";
 
 export function syncRois(state, nwin) {
   if (!state.rois) state.rois = [];
@@ -64,7 +70,7 @@ export async function requestQcGridWindow(
       typeof apiFetch === "function"
     ) {
       const res = await apiFetch(
-        `${API_BASE}/qc/window`,
+        `${API_BASE}${routes.qcWindow}`,
         {
           method: "POST",
           headers: {
@@ -94,7 +100,7 @@ export async function requestQcGridWindow(
       }
     } else {
       const data = await apiJson(
-        `${API_BASE}/qc/window`,
+        `${API_BASE}${routes.qcWindow}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -123,70 +129,6 @@ export async function requestQcGridWindow(
   } finally {
     setQcWindowLoadingForGrid(state, gridIdx, false);
   }
-}
-
-function isQcRawF32Payload(buffer, formatHeader = "") {
-  if (formatHeader === "qc-raw-f32-v1") return true;
-  if (!buffer || buffer.byteLength < 4) return false;
-  const sig = new Uint8Array(buffer, 0, 4);
-  return sig[0] === 77 && sig[1] === 81 && sig[2] === 67 && sig[3] === 82; // "MQCR"
-}
-
-function decodeQcJsonPayload(buffer) {
-  const text = new TextDecoder().decode(new Uint8Array(buffer));
-  return JSON.parse(text);
-}
-
-function decodeQcRawF32(buffer) {
-  // Wire format:
-  // 4 bytes magic "MQCR" + uint32 version + fixed metadata fields + repeated channel blocks.
-  // Each channel block is: int32 channel_index, uint32 n, float32[n] samples.
-  const view = new DataView(buffer);
-  const decodeText = (offset, len) =>
-    String.fromCharCode(...new Uint8Array(buffer.slice(offset, offset + len)));
-  if (decodeText(0, 4) !== "MQCR") {
-    throw new Error("Invalid QC raw payload");
-  }
-  let offset = 4;
-  const version = view.getUint32(offset, true);
-  offset += 4;
-  if (version !== 1) {
-    throw new Error(`Unsupported QC raw payload version: ${version}`);
-  }
-  const grid_index = view.getInt32(offset, true);
-  offset += 4;
-  const channel_index = view.getInt32(offset, true);
-  offset += 4;
-  const start = view.getInt32(offset, true);
-  offset += 4;
-  const end = view.getInt32(offset, true);
-  offset += 4;
-  const total_samples = view.getInt32(offset, true);
-  offset += 4;
-  const fsamp = view.getFloat32(offset, true);
-  offset += 4;
-  const nChannels = view.getUint32(offset, true);
-  offset += 4;
-
-  const channels = [];
-  for (let i = 0; i < nChannels; i++) {
-    const chIdx = view.getInt32(offset, true);
-    offset += 4;
-    const n = view.getUint32(offset, true);
-    offset += 4;
-    const series = new Float32Array(buffer, offset, n);
-    offset += n * 4;
-    channels.push({ channel_index: chIdx, series: Array.from(series) });
-  }
-  return {
-    grid_index,
-    channel_index,
-    start,
-    end,
-    total_samples,
-    fsamp,
-    channels,
-  };
 }
 
 export async function requestPreview(deps, options = {}) {
@@ -221,7 +163,7 @@ export async function requestPreview(deps, options = {}) {
     let data;
     if (filepath) {
       data = await apiJson(
-        `${API_BASE}/preview-by-path`,
+        `${API_BASE}${routes.previewByPath}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -233,7 +175,7 @@ export async function requestPreview(deps, options = {}) {
       const formData = new FormData();
       formData.append("file", state.file);
       data = await apiJson(
-        `${API_BASE}/preview`,
+        `${API_BASE}${routes.preview}`,
         { method: "POST", body: formData },
         120000,
       );

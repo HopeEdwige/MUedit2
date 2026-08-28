@@ -4,6 +4,7 @@ import {
   DECOMPOSITION_EXTENSIONS,
   RAW_SIGNAL_EXTENSIONS,
 } from "../config.js";
+import { routes } from "../api/routes.js";
 import { els } from "./dom.js";
 import { apiFetch, apiJson, waitForBackend } from "./http.js";
 import {
@@ -19,7 +20,7 @@ import {
   applySessionInfoToDom as applySessionInfoToDomController,
   renderBidsAutoInfo as renderBidsAutoInfoController,
   renderBidsMuscleFields as renderBidsMuscleFieldsController,
-} from "../view/bids_renderer.js";
+} from "../view/bids-renderer.js";
 import {
   adjustView as adjustViewFeature,
   getViewForStage as getViewForStageFeature,
@@ -30,16 +31,16 @@ import {
 import {
   createImportStageService,
   setupImportEvents,
-} from "./stages/import_stage.js";
-import { createRunStageService, setupRunEvents } from "./stages/run_stage.js";
+} from "./stages/import-stage.js";
+import { createRunStageService, setupRunEvents } from "./stages/run-stage.js";
 import {
   createEditStageService,
   setupEditEvents,
-} from "./stages/edit_stage.js";
+} from "./stages/edit-stage.js";
 import {
   createLayoutStageService,
   setupLayoutEvents,
-} from "./stages/layout_stage.js";
+} from "./stages/layout-stage.js";
 import {
   drawGridOverlay,
   drawMiniSeries,
@@ -57,8 +58,8 @@ import {
 } from "../state/actions.js";
 import { getCurrentGrid as getCurrentGridSelector } from "../state/selectors.js";
 import { createUiService } from "./services/ui.js";
-import { createFileSessionService } from "./services/file_session.js";
-import { createQcStageService } from "./stages/qc_stage.js";
+import { createFileSessionService } from "./services/file-session.js";
+import { createQcStageService } from "./stages/qc-stage.js";
 
 function nextFrame() {
   return new Promise((resolve) => {
@@ -162,7 +163,7 @@ async function persistNpzBySaveTarget(payload, fallbackName, fileSession, ui) {
     }) || payload.entity_label;
 
   const data = await apiJson(
-    `${API_BASE}/edit/save`,
+    `${API_BASE}${routes.editSave}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -503,7 +504,7 @@ export async function initializeApp() {
   if (els.browseSignalBtn) els.browseSignalBtn.disabled = true;
   ui.setStatus("Connecting to backend…", "muted");
 
-  const ready = await waitForBackend(`${API_BASE}/health`);
+  const ready = await waitForBackend(`${API_BASE}${routes.health}`);
   if (ready) {
     if (els.browseSignalBtn) els.browseSignalBtn.disabled = false;
     ui.setStatus("", "muted");

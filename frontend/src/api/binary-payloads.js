@@ -41,6 +41,64 @@ function to2d(raw, rows, cols) {
   return out;
 }
 
+export function isQcRawF32Payload(buffer, formatHeader = "") {
+  return formatHeader === "qc-raw-f32-v1" || hasMagic(buffer, "MQCR");
+}
+
+export function decodeQcJsonPayload(buffer) {
+  return JSON.parse(textDecoder.decode(new Uint8Array(buffer)));
+}
+
+export function decodeQcRawF32(buffer) {
+  // Wire format:
+  // 4 bytes magic "MQCR" + uint32 version + fixed metadata fields + repeated channel blocks.
+  // Each channel block is: int32 channel_index, uint32 n, float32[n] samples.
+  const view = new DataView(buffer);
+  if (!hasMagic(buffer, "MQCR")) {
+    throw new Error("Invalid QC raw payload");
+  }
+  let offset = 4;
+  const version = view.getUint32(offset, true);
+  offset += 4;
+  if (version !== 1) {
+    throw new Error(`Unsupported QC raw payload version: ${version}`);
+  }
+  const grid_index = view.getInt32(offset, true);
+  offset += 4;
+  const channel_index = view.getInt32(offset, true);
+  offset += 4;
+  const start = view.getInt32(offset, true);
+  offset += 4;
+  const end = view.getInt32(offset, true);
+  offset += 4;
+  const total_samples = view.getInt32(offset, true);
+  offset += 4;
+  const fsamp = view.getFloat32(offset, true);
+  offset += 4;
+  const nChannels = view.getUint32(offset, true);
+  offset += 4;
+
+  const channels = [];
+  for (let i = 0; i < nChannels; i++) {
+    const chIdx = view.getInt32(offset, true);
+    offset += 4;
+    const n = view.getUint32(offset, true);
+    offset += 4;
+    const series = new Float32Array(buffer, offset, n);
+    offset += n * 4;
+    channels.push({ channel_index: chIdx, series: Array.from(series) });
+  }
+  return {
+    grid_index,
+    channel_index,
+    start,
+    end,
+    total_samples,
+    fsamp,
+    channels,
+  };
+}
+
 export function isEditLoadF32Payload(buffer, formatHeader = "") {
   return formatHeader === "edit-load-f32-v1" || hasMagic(buffer, "MELD");
 }

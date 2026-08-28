@@ -23,7 +23,7 @@ import {
   bindEditCanvas as bindEditCanvasFeature,
   bindEditDrCanvas as bindEditDrCanvasFeature,
   bindEditTimeline as bindEditTimelineFeature,
-} from "../../view/edit_canvas.js";
+} from "../../view/edit-canvas.js";
 import {
   saveEditedFile as saveEditedFileFeature,
   loadDecompositionForEdit as loadDecompositionForEditFeature,
@@ -33,7 +33,7 @@ import {
   removeOutliers as removeOutliersFeature,
   flagMuForDeletion as flagMuForDeletionFeature,
   removeDuplicateMus as removeDuplicateMusFeature,
-} from "../services/editing_service.js";
+} from "../services/editing-service.js";
 import {
   appendEditHistoryEntry,
   setEditProject,
