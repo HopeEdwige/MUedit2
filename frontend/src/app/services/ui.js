@@ -50,7 +50,7 @@ export function createUiService(deps) {
     const messageText = typeof message === "string" ? message.trim() : "";
     const msgLower = messageText.toLowerCase();
     let phase = "Idle";
-    if (stageText === "error" || messageText.toLowerCase().includes("error")) {
+    if (stageText === "error" || msgLower.includes("error")) {
       phase = "Failed";
     } else if (stageText === "done") {
       phase = "Complete";
@@ -148,6 +148,18 @@ export function createUiService(deps) {
     btn.textContent = `${label}: ${on ? "On" : "Off"}`;
   }
 
+  function applyLabeledToggle(btn, on, { shortSel, fullSel, prefix }) {
+    if (!btn) return;
+    btn.dataset.state = on ? "on" : "off";
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.classList.toggle("on", on);
+    const label = on ? "On" : "Off";
+    const shortEl = btn.querySelector(shortSel);
+    const fullEl = btn.querySelector(fullSel);
+    if (shortEl) shortEl.textContent = label;
+    if (fullEl) fullEl.textContent = `${prefix}: ${label}`;
+  }
+
   function isToggleOn(btn) {
     return btn?.dataset.state === "on";
   }
@@ -236,6 +248,7 @@ export function createUiService(deps) {
     setupLockedOnToggle,
     toggleConditional,
     isToggleOn,
+    applyLabeledToggle,
     runEditAction,
     setEditActionBusy,
   };

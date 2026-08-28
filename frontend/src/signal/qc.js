@@ -26,6 +26,21 @@ import {
   decodeQcRawF32,
 } from "../api/binary-payloads.js";
 import { routes } from "../api/routes.js";
+import { roiStart, roiEnd } from "../state/selectors.js";
+import {
+  resetBidsEntityDefaults,
+  applyParticipantFields,
+} from "../view/bids-renderer.js";
+
+function channelsToEnv(channels) {
+  return (Array.isArray(channels) ? channels : [])
+    .sort((a, b) => (a.channel_index ?? 0) - (b.channel_index ?? 0))
+    .map((c) =>
+      Array.isArray(c.series)
+        ? c.series
+        : { min: c.min || [], max: c.max || [] },
+    );
+}
 
 export function syncRois(state, nwin) {
   if (!state.rois) state.rois = [];
@@ -84,19 +99,10 @@ export async function requestQcGridWindow(
       const payload = await res.arrayBuffer();
       if (isQcRawF32Payload(payload, res.headers.get("x-muedit-format"))) {
         const decoded = decodeQcRawF32(payload);
-        env = decoded.channels
-          .sort((a, b) => (a.channel_index ?? 0) - (b.channel_index ?? 0))
-          .map((c) => c.series || []);
+        env = channelsToEnv(decoded.channels);
       } else {
         const data = decodeQcJsonPayload(payload);
-        const channels = Array.isArray(data.channels) ? data.channels : [];
-        env = channels
-          .sort((a, b) => (a.channel_index ?? 0) - (b.channel_index ?? 0))
-          .map((c) =>
-            Array.isArray(c.series)
-              ? c.series
-              : { min: c.min || [], max: c.max || [] },
-          );
+        env = channelsToEnv(data.channels);
       }
     } else {
       const data = await apiJson(
@@ -108,14 +114,7 @@ export async function requestQcGridWindow(
         },
         120000,
       );
-      const channels = Array.isArray(data.channels) ? data.channels : [];
-      env = channels
-        .sort((a, b) => (a.channel_index ?? 0) - (b.channel_index ?? 0))
-        .map((c) =>
-          Array.isArray(c.series)
-            ? c.series
-            : { min: c.min || [], max: c.max || [] },
-        );
+      env = channelsToEnv(data.channels);
     }
     setChannelTraceForGrid(state, gridIdx, env);
     if (gridIdx === state.currentGrid) {
@@ -210,8 +209,8 @@ export async function requestPreview(deps, options = {}) {
     const roiPreview = state.rois?.[0];
     await requestQcGridWindow(
       getCurrentGrid(),
-      Number.isFinite(roiPreview?.start) ? roiPreview.start : 0,
-      Number.isFinite(roiPreview?.end) ? roiPreview.end : state.seriesLength,
+      roiStart(roiPreview),
+      roiEnd(roiPreview, state.seriesLength),
     );
     enableRoiSelection("emgCanvas");
     enableRoiSelection("auxCanvas");
@@ -223,13 +222,7 @@ export async function requestPreview(deps, options = {}) {
 
     // Populate participant and hardware fields from BIDS sidecars when available.
     const participant = data?.participant_meta || {};
-    const naToEmpty = (v) => (!v || v === "n/a" ? "" : v);
-    if (els.bidsParticipantAge && participant.age != null)
-      els.bidsParticipantAge.value = naToEmpty(participant.age);
-    if (els.bidsParticipantSex && participant.sex != null)
-      els.bidsParticipantSex.value = naToEmpty(participant.sex);
-    if (els.bidsParticipantHandedness && participant.handedness != null)
-      els.bidsParticipantHandedness.value = naToEmpty(participant.handedness);
+    applyParticipantFields(els, participant);
     if (els.bidsManufacturer && data?.manufacturer)
       els.bidsManufacturer.value = data.manufacturer;
     if (els.bidsDeviceModel && data?.manufacturers_model_name)
@@ -262,15 +255,7 @@ export async function handleRawFile(deps, file, options = {}) {
 
   if (!file) return;
   beginRawPreviewTransition(state, file);
-  if (els.bidsSubject) els.bidsSubject.value = "1";
-  if (els.bidsSession) els.bidsSession.value = "1";
-  if (els.bidsAcquisition) els.bidsAcquisition.value = "";
-  if (els.bidsRun) els.bidsRun.value = "";
-  if (els.bidsTask) els.bidsTask.value = "trapezoid";
-  if (els.fileName) {
-    els.fileName.textContent = file.name;
-    els.fileName.classList.remove("loading");
-  }
+  resetBidsEntityDefaults(els, file.name);
   setStatus("File ready");
   updateStartAvailability();
   const ok = await requestPreview({ silentFailure: silentPreviewFailure });

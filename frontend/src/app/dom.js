@@ -8,7 +8,6 @@ export const els = {
   stepEdit: document.getElementById("stepEdit"),
   fileName: document.getElementById("fileName"),
   browseSignalBtn: document.getElementById("browseSignalBtn"),
-  signalFileInput: document.getElementById("signalFileInput"),
   uploadLoader: document.getElementById("uploadLoader"),
   uploadFormatError: document.getElementById("uploadFormatError"),
   landing: document.getElementById("landing"),

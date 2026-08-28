@@ -211,8 +211,6 @@ export function createEditStageService(deps) {
         setEditStatus,
         ensureEditFlagged,
         setEditMode,
-        setEditBookmark,
-        setShowBookmark,
         recomputeEditDirty,
         renderEditExplorer,
         appendEditHistory,
@@ -234,8 +232,6 @@ export function createEditStageService(deps) {
         backupEditMu,
         buildEntityLabelFromSession,
         ensureEditFlagged,
-        setEditBookmark,
-        setShowBookmark,
         recomputeEditDirty,
         refreshEditTotals,
         renderEditExplorer,
@@ -317,8 +313,6 @@ export function createEditStageService(deps) {
       getRawPulse,
       backupEditMu,
       ensureEditFlagged,
-      setEditBookmark,
-      setShowBookmark,
       recomputeEditDirty,
       renderEditExplorer,
       appendEditHistory,
@@ -520,6 +514,7 @@ export function setupEditEvents(deps) {
     setEditMode,
     refreshEditModeButtons,
     handleKeyboardNavigation,
+    applyLabeledToggle,
   } = deps;
 
   bindEditCanvas();
@@ -550,40 +545,32 @@ export function setupEditEvents(deps) {
     void runEditAction(els.editUpdateBtn, updateMuFilter);
   });
   if (els.editPeelOffToggle) {
-    const applyPeelOff = (btn, on) => {
-      btn.dataset.state = on ? "on" : "off";
-      btn.setAttribute("aria-pressed", on ? "true" : "false");
-      btn.classList.toggle("on", on);
-      const label = on ? "On" : "Off";
-      const shortEl = btn.querySelector(".peeloff-short");
-      const fullEl = btn.querySelector(".peeloff-full");
-      if (shortEl) shortEl.textContent = label;
-      if (fullEl) fullEl.textContent = `Peel-off: ${label}`;
+    const peelOffConfig = {
+      shortSel: ".peeloff-short",
+      fullSel: ".peeloff-full",
+      prefix: "Peel-off",
     };
-    applyPeelOff(els.editPeelOffToggle, false);
+    applyLabeledToggle(els.editPeelOffToggle, false, peelOffConfig);
     els.editPeelOffToggle.addEventListener("click", () => {
-      applyPeelOff(
+      applyLabeledToggle(
         els.editPeelOffToggle,
         els.editPeelOffToggle.dataset.state !== "on",
+        peelOffConfig,
       );
     });
   }
   if (els.editLockSpikesToggle) {
-    const applyLockSpikes = (btn, on) => {
-      btn.dataset.state = on ? "on" : "off";
-      btn.setAttribute("aria-pressed", on ? "true" : "false");
-      btn.classList.toggle("on", on);
-      const label = on ? "On" : "Off";
-      const shortEl = btn.querySelector(".lockspikes-short");
-      const fullEl = btn.querySelector(".lockspikes-full");
-      if (shortEl) shortEl.textContent = label;
-      if (fullEl) fullEl.textContent = `Lock: ${label}`;
+    const lockSpikesConfig = {
+      shortSel: ".lockspikes-short",
+      fullSel: ".lockspikes-full",
+      prefix: "Lock",
     };
-    applyLockSpikes(els.editLockSpikesToggle, false);
+    applyLabeledToggle(els.editLockSpikesToggle, false, lockSpikesConfig);
     els.editLockSpikesToggle.addEventListener("click", () => {
-      applyLockSpikes(
+      applyLabeledToggle(
         els.editLockSpikesToggle,
         els.editLockSpikesToggle.dataset.state !== "on",
+        lockSpikesConfig,
       );
     });
   }

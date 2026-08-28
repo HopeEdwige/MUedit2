@@ -20,6 +20,7 @@ import {
 import { decodeDecomposePreviewPayload } from "../api/binary-payloads.js";
 import { normalizePreviewPayload } from "../api/payloads.js";
 import { routes } from "../api/routes.js";
+import { roiStart, roiEnd } from "../state/selectors.js";
 
 export async function autoSaveRunDecomposition(deps) {
   const {
@@ -89,7 +90,7 @@ export async function runDecomposition(deps) {
     API_BASE,
     apiFetch,
     getBidsProject,
-    getBidsMuscleNames,
+    collectBidsEntities,
     buildParams,
     updateStartAvailability,
     switchStage,
@@ -141,33 +142,7 @@ export async function runDecomposition(deps) {
     if (project) {
       formData.append("project", project);
     }
-    const bidsEntities = {};
-    const subject = String(els.bidsSubject?.value || "").trim();
-    const task = String(els.bidsTask?.value || "").trim();
-    const session = String(els.bidsSession?.value || "").trim();
-    const run = String(els.bidsRun?.value || "").trim();
-    if (subject) bidsEntities.subject = subject;
-    if (task) bidsEntities.task = task;
-    if (session) bidsEntities.session = session;
-    if (run) bidsEntities.run = run;
-    const muscleNames =
-      typeof getBidsMuscleNames === "function" ? getBidsMuscleNames() : [];
-    if (muscleNames.length) bidsEntities.target_muscle = muscleNames;
-    const powerlineFreq = Number(els.bidsPowerlineFreq?.value || 50);
-    if (powerlineFreq) bidsEntities.powerline_freq = powerlineFreq;
-    const manufacturer = String(els.bidsManufacturer?.value || "").trim();
-    if (manufacturer) bidsEntities.manufacturer = manufacturer;
-    const deviceModel = String(els.bidsDeviceModel?.value || "").trim();
-    if (deviceModel) bidsEntities.manufacturers_model_name = deviceModel;
-    const placementScheme = String(els.bidsPlacementScheme?.value || "").trim();
-    if (placementScheme) bidsEntities.placement_scheme = placementScheme;
-    const placementDesc = String(
-      els.bidsPlacementDescription?.value || "",
-    ).trim();
-    if (placementDesc)
-      bidsEntities.placement_scheme_description = placementDesc;
-    const taskDescription = String(els.bidsTaskDescription?.value || "").trim();
-    if (taskDescription) bidsEntities.task_description = taskDescription;
+    const bidsEntities = collectBidsEntities();
     if (Object.keys(bidsEntities).length) {
       formData.append("bids_entities", JSON.stringify(bidsEntities));
     }
@@ -330,39 +305,15 @@ function applyPreviewData(deps, preview, options = {}) {
     setMuscle(state, muscle);
   }
   if (!skipMuData) {
-    // Preview messages may deliver MU fields incrementally; update each slice independently
-    // while preserving previously populated slices.
-    if (pulse_trains_full && pulse_trains_full.length) {
-      setMuPreviewData(
-        state,
-        pulse_trains_full,
-        state.muDistimes,
-        state.muGridIndex,
-      );
-    } else if (pulse_trains_all) {
-      setMuPreviewData(
-        state,
-        pulse_trains_all,
-        state.muDistimes,
-        state.muGridIndex,
-      );
-    }
-    if (distime_all) {
-      setMuPreviewData(
-        state,
-        state.muPulseTrains,
-        distime_all,
-        state.muGridIndex,
-      );
-    }
-    if (mu_grid_index) {
-      setMuPreviewData(
-        state,
-        state.muPulseTrains,
-        state.muDistimes,
-        mu_grid_index,
-      );
-    }
+    // Preview messages may deliver MU fields incrementally; update each slice
+    // independently while preserving previously populated slices.
+    const newPulseTrains =
+      pulse_trains_full && pulse_trains_full.length
+        ? pulse_trains_full
+        : pulse_trains_all || state.muPulseTrains;
+    const newDistimes = distime_all || state.muDistimes;
+    const newGridIndex = mu_grid_index || state.muGridIndex;
+    setMuPreviewData(state, newPulseTrains, newDistimes, newGridIndex);
   }
   if (auxiliary) {
     setAuxData(state, auxiliary, auxiliary_names || []);
@@ -375,8 +326,8 @@ function applyPreviewData(deps, preview, options = {}) {
   const roiStream = state.rois?.[0];
   requestQcGridWindow(
     getCurrentGrid(),
-    Number.isFinite(roiStream?.start) ? roiStream.start : 0,
-    Number.isFinite(roiStream?.end) ? roiStream.end : state.seriesLength,
+    roiStart(roiStream),
+    roiEnd(roiStream, state.seriesLength),
   );
   setPreviewSeries(state, mean_abs);
   const emgCanvas = els?.emgCanvas || "emgCanvas";

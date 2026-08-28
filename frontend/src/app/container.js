@@ -56,7 +56,11 @@ import {
   setMuscle as setMuscleAction,
   setShowBookmark,
 } from "../state/actions.js";
-import { getCurrentGrid as getCurrentGridSelector } from "../state/selectors.js";
+import {
+  getCurrentGrid as getCurrentGridSelector,
+  roiStart,
+  roiEnd,
+} from "../state/selectors.js";
 import { createUiService } from "./services/ui.js";
 import { createFileSessionService } from "./services/file-session.js";
 import { createQcStageService } from "./stages/qc-stage.js";
@@ -218,8 +222,8 @@ function setSelectedGrid(idx) {
   const roi = state.rois?.[0];
   qcStage.requestQcGridWindow(
     state.currentGrid,
-    Number.isFinite(roi?.start) ? roi.start : 0,
-    Number.isFinite(roi?.end) ? roi.end : state.seriesLength,
+    roiStart(roi),
+    roiEnd(roi, state.seriesLength),
   );
 }
 
@@ -303,6 +307,7 @@ function handleKeyboardNavigation(e) {
       adjustViewFn: adjustView,
       setViewForStageFn: setViewForStage,
       setShowBookmark: setShowBookmark,
+      applyLabeledToggle: ui.applyLabeledToggle,
     },
     e,
   );
@@ -345,6 +350,7 @@ runStage = createRunStageService({
     persistNpzBySaveTarget(payload, fallbackName, fileSession, ui),
   getBidsProject: fileSession.getBidsProject,
   getBidsMuscleNames: fileSession.getBidsMuscleNames,
+  collectBidsEntities: fileSession.collectBidsEntities,
   buildParams: () => buildParams(ui.isToggleOn),
   updateStartAvailability,
   switchStage: ui.switchStage,
@@ -486,6 +492,7 @@ function wireEvents() {
     setEditMode: setEditModeWithStatus,
     refreshEditModeButtons,
     handleKeyboardNavigation,
+    applyLabeledToggle: ui.applyLabeledToggle,
   });
 
   setupLayoutEvents({

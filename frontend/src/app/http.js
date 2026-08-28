@@ -1,4 +1,4 @@
-export async function parseApiError(res) {
+async function parseApiError(res) {
   let message = `HTTP ${res.status}`;
   try {
     const data = await res.json();

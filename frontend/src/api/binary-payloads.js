@@ -99,7 +99,7 @@ export function decodeQcRawF32(buffer) {
   };
 }
 
-export function isEditLoadF32Payload(buffer, formatHeader = "") {
+function isEditLoadF32Payload(buffer, formatHeader = "") {
   return formatHeader === "edit-load-f32-v1" || hasMagic(buffer, "MELD");
 }
 
@@ -130,7 +130,7 @@ export function decodeEditLoadPayload(buffer, formatHeader = "") {
   return { ...meta, pulse_trains_full: pulse };
 }
 
-export function isDecomposePreviewF32Payload(buffer, formatHeader = "") {
+function isDecomposePreviewF32Payload(buffer, formatHeader = "") {
   return (
     formatHeader === "decompose-preview-f32-v1" || hasMagic(buffer, "MDPV")
   );

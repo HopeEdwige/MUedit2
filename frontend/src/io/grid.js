@@ -30,3 +30,15 @@ export function normalizeGridNames(gridNames, { minimumCount = 1 } = {}) {
     return raw || `Grid ${i + 1}`;
   });
 }
+
+export function gridDimensionsFor(coords) {
+  let maxRow = 0;
+  let maxCol = 0;
+  (coords || []).forEach((c) => {
+    if (Array.isArray(c) && c.length >= 2) {
+      maxRow = Math.max(maxRow, c[0]);
+      maxCol = Math.max(maxCol, c[1]);
+    }
+  });
+  return { rows: maxRow + 1, cols: maxCol + 1 };
+}

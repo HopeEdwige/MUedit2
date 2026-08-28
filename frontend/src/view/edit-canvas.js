@@ -15,6 +15,11 @@ import {
   setEditView,
 } from "../state/actions.js";
 
+const TIMELINE_PAD_L = 38;
+const TIMELINE_PAD_R = 8;
+const TIMELINE_BAR_TOP = 4;
+const TIMELINE_BAR_H = 12;
+
 function renderBookmark(canvas, state, muIdx, view, getCanvasPlotMetrics) {
   const bookmark = state.edit.bookmarkPosition;
   if (!bookmark || bookmark.muIdx !== muIdx) return;
@@ -51,6 +56,51 @@ function clampY(py, canvas, getCanvasPlotMetrics) {
     Math.min(metrics.padding.top + metrics.plotHeight, py),
   );
   return clamped - metrics.padding.top;
+}
+
+function createDragState(canvas, getCanvasPlotMetrics, pxToSample) {
+  let dragging = false;
+  let startPx = 0;
+  let endPx = 0;
+  let startPy = 0;
+  let endPy = 0;
+
+  return {
+    begin(e) {
+      const rect = canvas.getBoundingClientRect();
+      startPx = e.clientX - rect.left;
+      endPx = startPx;
+      startPy = e.clientY - rect.top;
+      endPy = startPy;
+      dragging = true;
+    },
+    update(e) {
+      if (!dragging) return null;
+      const rect = canvas.getBoundingClientRect();
+      endPx = e.clientX - rect.left;
+      endPy = e.clientY - rect.top;
+      return this.selection();
+    },
+    selection() {
+      const startSample = pxToSample(Math.min(startPx, endPx));
+      const endSample = pxToSample(Math.max(startPx, endPx));
+      return {
+        start: Math.max(0, startSample),
+        end: Math.max(startSample + 1, endSample),
+        yMin: clampY(Math.min(startPy, endPy), canvas, getCanvasPlotMetrics),
+        yMax: clampY(Math.max(startPy, endPy), canvas, getCanvasPlotMetrics),
+      };
+    },
+    get dragging() {
+      return dragging;
+    },
+    get delta() {
+      return Math.abs(endPx - startPx);
+    },
+    stop() {
+      dragging = false;
+    },
+  };
 }
 
 export function renderEditExplorer(deps) {
@@ -197,11 +247,6 @@ export function bindEditCanvas(deps) {
 
   const canvas = els.editPulseCanvas;
   if (!canvas) return;
-  let dragging = false;
-  let startPx = 0;
-  let endPx = 0;
-  let startPy = 0;
-  let endPy = 0;
 
   const getPulse = () => getRawPulse(state.edit.currentMu ?? 0);
 
@@ -219,44 +264,26 @@ export function bindEditCanvas(deps) {
     return Math.round(view.start + frac * Math.max(0, view.end - view.start));
   };
 
+  const drag = createDragState(canvas, getCanvasPlotMetrics, pxToSample);
+
   canvas.addEventListener("mousedown", (e) => {
     if (!getPulse().length) return;
-    dragging = true;
-    const rect = canvas.getBoundingClientRect();
-    startPx = e.clientX - rect.left;
-    endPx = startPx;
-    startPy = e.clientY - rect.top;
-    endPy = startPy;
+    drag.begin(e);
     setEditPulseDraftSelection(state, null);
   });
 
   canvas.addEventListener("mousemove", (e) => {
-    if (!dragging) return;
-    const rect = canvas.getBoundingClientRect();
-    endPx = e.clientX - rect.left;
-    endPy = e.clientY - rect.top;
-    const startSample = pxToSample(Math.min(startPx, endPx));
-    const endSample = pxToSample(Math.max(startPx, endPx));
-    setEditPulseDraftSelection(state, {
-      start: Math.max(0, startSample),
-      end: Math.max(startSample + 1, endSample),
-      yMin: clampY(Math.min(startPy, endPy), canvas, getCanvasPlotMetrics),
-      yMax: clampY(Math.max(startPy, endPy), canvas, getCanvasPlotMetrics),
-    });
+    if (!drag.dragging) return;
+    const sel = drag.update(e);
+    setEditPulseDraftSelection(state, sel);
     renderEditExplorer();
   });
 
   window.addEventListener("mouseup", () => {
-    if (!dragging) return;
-    dragging = false;
-    const delta = Math.abs(endPx - startPx);
-    const sel = {
-      start: pxToSample(Math.min(startPx, endPx)),
-      end: pxToSample(Math.max(startPx, endPx)),
-      yMin: clampY(Math.min(startPy, endPy), canvas, getCanvasPlotMetrics),
-      yMax: clampY(Math.max(startPy, endPy), canvas, getCanvasPlotMetrics),
-    };
-    if (delta < 6) {
+    if (!drag.dragging) return;
+    drag.stop();
+    const sel = drag.selection();
+    if (drag.delta < 6) {
       if (state.edit.mode === "add") {
         setEditStatus("Drag a box to add spikes", "muted");
         return;
@@ -295,14 +322,7 @@ export function bindEditCanvas(deps) {
       return;
     }
 
-    const startSample = pxToSample(Math.min(startPx, endPx));
-    const endSample = pxToSample(Math.max(startPx, endPx));
-    setEditPulseSelection(state, {
-      start: Math.max(0, startSample),
-      end: Math.max(startSample + 1, endSample),
-      yMin: sel.yMin,
-      yMax: sel.yMax,
-    });
+    setEditPulseSelection(state, sel);
     setEditPulseDraftSelection(state, null);
     renderEditExplorer();
   });
@@ -335,15 +355,10 @@ export function renderEditTimeline(deps) {
   const total = pulse?.length || 0;
   if (!total) return;
 
-  // Match horizontal padding of editPulseCanvas (showAxes: true, y-axis visible)
-  const padL = 38;
-  const padR = 8;
-  const bw = Math.max(1, w - padL - padR);
-  const barTop = 4;
-  const barH = 12;
+  const bw = Math.max(1, w - TIMELINE_PAD_L - TIMELINE_PAD_R);
 
   ctx.fillStyle = "rgba(255,255,255,0.07)";
-  ctx.fillRect(padL, barTop, bw, barH);
+  ctx.fillRect(TIMELINE_PAD_L, TIMELINE_BAR_TOP, bw, TIMELINE_BAR_H);
 
   // Last edit action for this MU: green = added, red = removed
   const muUid = state.edit.muUids?.[muIdx];
@@ -362,11 +377,21 @@ export function renderEditTimeline(deps) {
       ];
       ctx.fillStyle = "rgba(74,222,128,0.85)";
       added.forEach((s) => {
-        ctx.fillRect(padL + Math.round((s / total) * bw), barTop, 2, barH);
+        ctx.fillRect(
+          TIMELINE_PAD_L + Math.round((s / total) * bw),
+          TIMELINE_BAR_TOP,
+          2,
+          TIMELINE_BAR_H,
+        );
       });
       ctx.fillStyle = "rgba(248,113,113,0.85)";
       removed.forEach((s) => {
-        ctx.fillRect(padL + Math.round((s / total) * bw), barTop, 2, barH);
+        ctx.fillRect(
+          TIMELINE_PAD_L + Math.round((s / total) * bw),
+          TIMELINE_BAR_TOP,
+          2,
+          TIMELINE_BAR_H,
+        );
       });
     }
   }
@@ -375,29 +400,31 @@ export function renderEditTimeline(deps) {
   const spikes = state.edit.distimes?.[muIdx] || [];
   ctx.fillStyle = "rgba(231,193,255,0.35)";
   spikes.forEach((s) => {
-    const x = padL + Math.round((s / total) * bw);
-    ctx.fillRect(x, barTop, 2, barH);
+    const x = TIMELINE_PAD_L + Math.round((s / total) * bw);
+    ctx.fillRect(x, TIMELINE_BAR_TOP, 2, TIMELINE_BAR_H);
   });
 
   // View window
   const view = state.edit.view || { start: 0, end: total };
-  const x1 = padL + (Math.max(0, view.start) / total) * bw;
-  const x2 = padL + (Math.min(total, view.end) / total) * bw;
+  const x1 = TIMELINE_PAD_L + (Math.max(0, view.start) / total) * bw;
+  const x2 = TIMELINE_PAD_L + (Math.min(total, view.end) / total) * bw;
   const ww = Math.max(4, x2 - x1);
   ctx.fillStyle = "rgba(195,155,242,0.28)";
-  ctx.fillRect(x1, barTop - 2, ww, barH + 4);
+  ctx.fillRect(x1, TIMELINE_BAR_TOP - 2, ww, TIMELINE_BAR_H + 4);
   ctx.strokeStyle = "rgba(195,155,242,0.75)";
   ctx.lineWidth = 1;
-  ctx.strokeRect(x1 + 0.5, barTop - 1.5, Math.max(3, ww - 1), barH + 3);
+  ctx.strokeRect(
+    x1 + 0.5,
+    TIMELINE_BAR_TOP - 1.5,
+    Math.max(3, ww - 1),
+    TIMELINE_BAR_H + 3,
+  );
 }
 
 export function bindEditTimeline(deps) {
   const { els, state, getDisplayPulse, renderEditExplorer } = deps;
   const canvas = els?.editTimelineCanvas;
   if (!canvas) return;
-
-  const PAD_L = 38;
-  const PAD_R = 8;
 
   let dragging = false;
   let startClientX = 0;
@@ -409,8 +436,11 @@ export function bindEditTimeline(deps) {
 
   const fracFromClientX = (clientX) => {
     const rect = canvas.getBoundingClientRect();
-    const bw = Math.max(1, rect.width - PAD_L - PAD_R);
-    return Math.max(0, Math.min(1, (clientX - rect.left - PAD_L) / bw));
+    const bw = Math.max(1, rect.width - TIMELINE_PAD_L - TIMELINE_PAD_R);
+    return Math.max(
+      0,
+      Math.min(1, (clientX - rect.left - TIMELINE_PAD_L) / bw),
+    );
   };
 
   canvas.addEventListener("mousedown", (e) => {
@@ -428,7 +458,7 @@ export function bindEditTimeline(deps) {
     const total = getTotal();
     if (!total) return;
     const rect = canvas.getBoundingClientRect();
-    const bw = Math.max(1, rect.width - PAD_L - PAD_R);
+    const bw = Math.max(1, rect.width - TIMELINE_PAD_L - TIMELINE_PAD_R);
     const delta = Math.round(((e.clientX - startClientX) / bw) * total);
     const view = state.edit.view || { start: 0, end: total };
     const span = view.end - view.start;
@@ -482,11 +512,6 @@ export function bindEditDrCanvas(deps) {
 
   const canvas = els.editDrCanvas;
   if (!canvas) return;
-  let dragging = false;
-  let startPx = 0;
-  let endPx = 0;
-  let startPy = 0;
-  let endPy = 0;
 
   const pxToSample = (px) => {
     const metrics = getCanvasPlotMetrics(canvas, true, { hideYAxis: false });
@@ -502,48 +527,26 @@ export function bindEditDrCanvas(deps) {
     return Math.round(view.start + frac * Math.max(0, view.end - view.start));
   };
 
+  const drag = createDragState(canvas, getCanvasPlotMetrics, pxToSample);
+
   canvas.addEventListener("mousedown", (e) => {
-    dragging = true;
-    const rect = canvas.getBoundingClientRect();
-    startPx = e.clientX - rect.left;
-    endPx = startPx;
-    startPy = e.clientY - rect.top;
-    endPy = startPy;
+    drag.begin(e);
     setEditDrDraftSelection(state, null);
   });
 
   canvas.addEventListener("mousemove", (e) => {
-    if (!dragging) return;
-    const rect = canvas.getBoundingClientRect();
-    endPx = e.clientX - rect.left;
-    endPy = e.clientY - rect.top;
-    const startSample = pxToSample(Math.min(startPx, endPx));
-    const endSample = pxToSample(Math.max(startPx, endPx));
-    setEditDrDraftSelection(state, {
-      start: Math.max(0, startSample),
-      end: Math.max(startSample + 1, endSample),
-      yMin: clampY(Math.min(startPy, endPy), canvas, getCanvasPlotMetrics),
-      yMax: clampY(Math.max(startPy, endPy), canvas, getCanvasPlotMetrics),
-    });
+    if (!drag.dragging) return;
+    const sel = drag.update(e);
+    setEditDrDraftSelection(state, sel);
     renderEditExplorer();
   });
 
   window.addEventListener("mouseup", () => {
-    if (!dragging) return;
-    dragging = false;
-    const sel = {
-      start: pxToSample(Math.min(startPx, endPx)),
-      end: pxToSample(Math.max(startPx, endPx)),
-      yMin: clampY(Math.min(startPy, endPy), canvas, getCanvasPlotMetrics),
-      yMax: clampY(Math.max(startPy, endPy), canvas, getCanvasPlotMetrics),
-    };
+    if (!drag.dragging) return;
+    drag.stop();
+    const sel = drag.selection();
     clearEditDrSelections(state);
-    setEditDrSelection(state, {
-      start: Math.max(0, sel.start),
-      end: Math.max(sel.start + 1, sel.end),
-      yMin: sel.yMin,
-      yMax: sel.yMax,
-    });
+    setEditDrSelection(state, sel);
     renderEditExplorer();
     if (state.edit.mode === "delete_dr") {
       deleteDrInSelection(sel);

@@ -14,6 +14,7 @@ import {
   setEditTotalSamples,
   popLastEditHistoryEntryForMu,
 } from "../state/actions.js";
+import { muUidFor } from "../state/selectors.js";
 
 // --- State helpers ---
 
@@ -74,7 +75,7 @@ export function restoreEditBackup(deps) {
   if (backup.pulseTrain) {
     setEditPulseTrainForMu(state, muIdx, backup.pulseTrain);
   }
-  const muUid = state.edit.muUids?.[muIdx] ?? `mu${muIdx}`;
+  const muUid = muUidFor(state, muIdx);
   popLastEditHistoryEntryForMu(state, muUid);
   setEditBackup(state, null);
   clearAllEditSelections(state);
@@ -333,7 +334,7 @@ export function duplicateMu(deps) {
   state.edit.artifactTimes.push([]);
 
   if (deps.appendEditHistory) {
-    const sourceUid = state.edit.muUids?.[muIdx] ?? `mu${muIdx}`;
+    const sourceUid = muUidFor(state, muIdx);
     deps.appendEditHistory({
       type: "duplicate_mu",
       mu_uid: newUid,
@@ -362,7 +363,7 @@ export function resetCurrentMuEdits(deps) {
   }
   ensureEditFlagged();
   setEditFlagForMu(state, muIdx, false);
-  const muUid = state.edit.muUids?.[muIdx] ?? `mu${muIdx}`;
+  const muUid = muUidFor(state, muIdx);
   clearEditHistoryForMu(state, muUid);
   setEditBackup(state, null);
   clearAllEditSelections(state);

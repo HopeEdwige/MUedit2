@@ -90,7 +90,6 @@
                 viewBox="0 0 24 24"
                 stroke-width="1.5"
                 stroke="currentColor"
-                class="size-6"
                 aria-hidden="true"
               >
                 <path
@@ -267,10 +266,7 @@
                     <option value="Other">Other</option>
                   </select>
                 </div>
-                <div
-                  class="form-row conditional hidden"
-                  id="bidsPlacementDescRow"
-                >
+                <div class="form-row hidden" id="bidsPlacementDescRow">
                   <label for="bidsPlacementDescription">Description</label>
                   <input
                     type="text"
@@ -299,13 +295,7 @@
                 </div>
                 <div class="form-row">
                   <label for="fsamp">Fs (Hz)</label>
-                  <input
-                    type="number"
-                    id="fsamp"
-                    value="2048"
-                    readonly
-                    class="muted"
-                  />
+                  <input type="number" id="fsamp" value="2048" readonly />
                 </div>
                 <div class="form-row">
                   <label for="bidsPowerlineFreq">Power line (Hz)</label>
@@ -380,7 +370,7 @@
                     Peeloff: Off
                   </button>
                 </div>
-                <div class="form-row conditional hidden" id="peelOffSettings">
+                <div class="form-row hidden" id="peelOffSettings">
                   <label for="peelOffWindow">Window (ms)</label>
                   <input type="number" id="peelOffWindow" value="25" min="1" />
                 </div>
@@ -457,7 +447,7 @@
                     COV tool: Off
                   </button>
                 </div>
-                <div class="form-row conditional hidden" id="covSettings">
+                <div class="form-row hidden" id="covSettings">
                   <label for="covValue">COV threshold</label>
                   <input type="number" step="0.01" id="covValue" value="0.5" />
                 </div>
@@ -485,7 +475,6 @@
                       viewBox="0 0 24 24"
                       stroke-width="1.5"
                       stroke="currentColor"
-                      class="size-6"
                       aria-hidden="true"
                     >
                       <path
@@ -544,11 +533,7 @@
                       Decompose to see results
                     </div>
                   </div>
-                  <canvas
-                    id="muPulseCanvas"
-                    height="220"
-                    class="mu-canvas"
-                  ></canvas>
+                  <canvas id="muPulseCanvas" height="220"></canvas>
                 </div>
               </div>
 
@@ -862,19 +847,11 @@
                 </div>
                 <div class="chart-card glass edit-full" id="editDrCard">
                   <div class="chart-title">Firing Rate (pps)</div>
-                  <canvas
-                    id="editDrCanvas"
-                    height="280"
-                    class="mu-canvas muted-bg"
-                  ></canvas>
+                  <canvas id="editDrCanvas" height="280"></canvas>
                 </div>
                 <div class="chart-card glass edit-full" id="editPulseCard">
                   <div class="chart-title">Pulse Train</div>
-                  <canvas
-                    id="editPulseCanvas"
-                    height="280"
-                    class="mu-canvas"
-                  ></canvas>
+                  <canvas id="editPulseCanvas" height="280"></canvas>
                 </div>
                 <canvas
                   id="editTimelineCanvas"
@@ -886,13 +863,6 @@
           </div>
         </section>
       </main>
-
-      <input
-        id="signalFileInput"
-        type="file"
-        accept=".mat,.otb+,.otb4,.npz"
-        class="hidden"
-      />
     </div>
 
     <script type="module" src="app.js?v=62"></script>

@@ -10,6 +10,7 @@ import { decodeEditLoadPayload } from "../../api/binary-payloads.js";
 import { normalizeEditLoadPayload } from "../../api/payloads.js";
 import { routes } from "../../api/routes.js";
 import { inferGridCount, normalizeGridNames } from "../../io/grid.js";
+import { muUidFor } from "../../state/selectors.js";
 import {
   clearAllEditSelections,
   clearEditDrSelections,
@@ -67,6 +68,11 @@ function generateMuUids(muGridIndex) {
   });
 }
 
+function setEditBookmarkAndHide(state, muIdx, position) {
+  setEditBookmark(state, { muIdx, position });
+  setShowBookmark(state, false);
+}
+
 export async function requestRoiEdit(deps, action, payload) {
   const {
     state,
@@ -75,8 +81,6 @@ export async function requestRoiEdit(deps, action, payload) {
     setEditStatus,
     ensureEditFlagged,
     setEditMode,
-    setEditBookmark,
-    setShowBookmark,
     recomputeEditDirty,
     renderEditExplorer,
   } = deps;
@@ -121,7 +125,7 @@ export async function requestRoiEdit(deps, action, payload) {
     ensureEditFlagged();
     setEditFlagForMu(state, payload.muIdx, false);
     if (deps.appendEditHistory) {
-      const muUid = state.edit.muUids?.[payload.muIdx] ?? `mu${payload.muIdx}`;
+      const muUid = muUidFor(state, payload.muIdx);
 
       if (action === "delete-spikes") {
         // Create separate log entries for spikes and artifacts
@@ -178,8 +182,7 @@ export async function requestRoiEdit(deps, action, payload) {
     const bookmarkPos = Math.round(
       (payload.xStart + (payload.xEnd ?? payload.xStart)) / 2,
     );
-    setEditBookmark(state, { muIdx: payload.muIdx, position: bookmarkPos });
-    setShowBookmark(state, false);
+    setEditBookmarkAndHide(state, payload.muIdx, bookmarkPos);
 
     if (action === "delete-dr") {
       clearEditDrSelections(state);
@@ -206,8 +209,6 @@ export async function requestFilterUpdate(deps, mode) {
     getRawPulse,
     backupEditMu,
     ensureEditFlagged,
-    setEditBookmark,
-    setShowBookmark,
     recomputeEditDirty,
     refreshEditTotals,
     renderEditExplorer,
@@ -260,7 +261,7 @@ export async function requestFilterUpdate(deps, mode) {
     ensureEditFlagged();
     setEditFlagForMu(state, muIdx, false);
     if (deps.appendEditHistory) {
-      const muUid = state.edit.muUids?.[muIdx] ?? `mu${muIdx}`;
+      const muUid = muUidFor(state, muIdx);
       const distimesAfter = state.edit.distimes?.[muIdx] || [];
       const { added, removed } = spikesDiff(distimesBefore, distimesAfter);
       const peeloff = els.editPeelOffToggle?.dataset.state === "on";
@@ -278,8 +279,7 @@ export async function requestFilterUpdate(deps, mode) {
       deps.appendEditHistory(entry);
     }
     const centerPos = Math.round((start + end) / 2);
-    setEditBookmark(state, { muIdx, position: centerPos });
-    setShowBookmark(state, false);
+    setEditBookmarkAndHide(state, muIdx, centerPos);
     recomputeEditDirty();
     refreshEditTotals();
     renderEditExplorer();
@@ -298,8 +298,6 @@ export async function removeOutliers(deps) {
     getRawPulse,
     backupEditMu,
     ensureEditFlagged,
-    setEditBookmark,
-    setShowBookmark,
     recomputeEditDirty,
     renderEditExplorer,
   } = deps;
@@ -332,7 +330,7 @@ export async function removeOutliers(deps) {
     ensureEditFlagged();
     setEditFlagForMu(state, muIdx, false);
     if (deps.appendEditHistory && (data.removed_count || 0) > 0) {
-      const muUid = state.edit.muUids?.[muIdx] ?? `mu${muIdx}`;
+      const muUid = muUidFor(state, muIdx);
       const distimesAfter = state.edit.distimes?.[muIdx] || [];
       const { removed } = spikesDiff(spikes, distimesAfter);
       deps.appendEditHistory({
@@ -345,8 +343,7 @@ export async function removeOutliers(deps) {
     const centerPos = distimesAfter.length
       ? Math.round((distimesAfter[0] + distimesAfter.at(-1)) / 2)
       : Math.round(pulse.length / 2);
-    setEditBookmark(state, { muIdx, position: centerPos });
-    setShowBookmark(state, false);
+    setEditBookmarkAndHide(state, muIdx, centerPos);
     recomputeEditDirty();
     renderEditExplorer();
     if ((data.removed_count || 0) > 0) {
@@ -495,7 +492,7 @@ export async function flagMuForDeletion(deps) {
     ensureEditFlagged();
     setEditFlagForMu(state, muIdx, data.flagged !== false);
     if (deps.appendEditHistory) {
-      const muUid = state.edit.muUids?.[muIdx] ?? `mu${muIdx}`;
+      const muUid = muUidFor(state, muIdx);
       deps.appendEditHistory({
         type: "flag_mu",
         mu_uid: muUid,
@@ -810,9 +807,5 @@ export async function loadDecompositionForEdit(deps, file, filepath = null) {
 
 export async function handleDecompositionFile(deps, file) {
   if (!file) return;
-  if (typeof deps.loadDecompositionForEdit === "function") {
-    await deps.loadDecompositionForEdit(file);
-    return;
-  }
-  await loadDecompositionForEdit(deps, file);
+  await deps.loadDecompositionForEdit(file);
 }
