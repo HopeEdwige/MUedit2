@@ -451,14 +451,16 @@ export async function flagMuForDeletion(deps) {
     setEditStatus("No MU loaded", "muted");
     return;
   }
+  ensureEditFlagged();
+  const targetFlag = !state.edit.flagged[muIdx];
   backupEditMu();
   try {
-    setEditStatus("Flagging MU for deletion...", "muted");
+    setEditStatus(targetFlag ? "Flagging MU for deletion..." : "Unflagging MU...", "muted");
     const data = await api.editFlagMu({
       distimes: state.edit.distimes,
       mu_index: muIdx,
+      flag: targetFlag,
     });
-    ensureEditFlagged();
     setEditFlagForMu(state, muIdx, data.flagged !== false);
     if (deps.appendEditHistory) {
       const muUid = muUidFor(state, muIdx);
@@ -471,7 +473,7 @@ export async function flagMuForDeletion(deps) {
     setShowBookmark(state, false);
     recomputeEditDirty();
     renderEditExplorer();
-    setEditStatus("MU flagged for deletion", "success");
+    setEditStatus(targetFlag ? "MU flagged for deletion" : "MU unflagged", "success");
   } catch (err) {
     handleError(err, setEditStatus, "Flagging failed");
   }

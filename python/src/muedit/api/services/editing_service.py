@@ -39,6 +39,7 @@ from muedit.api.services.bids_helpers import (
     read_bids_sidecar_meta,
 )
 from muedit.api.services.edit_helpers import (
+    _coerce_dup_tol,
     _expected_grid_count,
     _generate_mu_uids,
     _normalize_flagged,
@@ -325,11 +326,20 @@ def save_edits(payload: EditSavePayload) -> dict[str, Any]:
     )
     edit_history: list[dict[str, Any]] = list(payload.edit_history or [])
     artifact_times_raw = payload.artifact_times or []
-    artifact_times_all: list[list[int]] = [
-        [int(x) for x in row if isinstance(x, (int, float))]
-        for row in artifact_times_raw
-        if isinstance(row, (list, tuple))
-    ]
+    # Preserve per-MU index alignment: substitute [] for malformed rows instead
+    # of dropping them, then pad to len(distimes) so keep_idx/kept_idx index safely.
+    artifact_times_all: list[list[int]] = []
+    for row in artifact_times_raw:
+        if isinstance(row, (list, tuple)):
+            artifact_times_all.append(
+                [int(x) for x in row if isinstance(x, (int, float))]
+            )
+        else:
+            artifact_times_all.append([])
+    if len(artifact_times_all) < len(distimes):
+        artifact_times_all.extend(
+            [[] for _ in range(len(distimes) - len(artifact_times_all))]
+        )
 
     # Schema declares these as bool | None; default to True when unspecified.
     remove_flagged = True if payload.remove_flagged is None else payload.remove_flagged
@@ -346,13 +356,10 @@ def save_edits(payload: EditSavePayload) -> dict[str, Any]:
         mu_grid_index = [mu_grid_index[i] for i in keep_idx]
         mu_uids = [mu_uids[i] for i in keep_idx]
         pulse_trains = pulse_trains[keep_idx, :] if pulse_trains.size else pulse_trains
-        artifact_times_all = [artifact_times_all[i] for i in keep_idx if i < len(artifact_times_all)]
+        artifact_times_all = [artifact_times_all[i] for i in keep_idx]
 
     if remove_duplicates and len(distimes) > 1 and fsamp and fsamp > 0:
-        dup_tol_raw = parameters.get("duplicatesthresh", 0.3)
-        while isinstance(dup_tol_raw, (list, tuple, np.ndarray)):
-            dup_tol_raw = dup_tol_raw[0] if len(dup_tol_raw) > 0 else 0.3
-        dup_tol = float(dup_tol_raw)
+        dup_tol = _coerce_dup_tol(parameters.get("duplicatesthresh", 0.3))
         dedup_pulses, dedup_distimes, kept_idx = _dedup(pulse_trains, distimes, dup_tol, fsamp)
         pulse_trains = dedup_pulses if dedup_pulses.size else np.zeros((0, total_samples))
         distimes = [
@@ -361,7 +368,7 @@ def save_edits(payload: EditSavePayload) -> dict[str, Any]:
         ]
         mu_grid_index = [mu_grid_index[i] for i in kept_idx]
         mu_uids = [mu_uids[i] for i in kept_idx]
-        artifact_times_all = [artifact_times_all[i] for i in kept_idx if i < len(artifact_times_all)]
+        artifact_times_all = [artifact_times_all[i] for i in kept_idx]
 
     bids_root = resolve_bids_root(payload.project)
     file_label = payload.file_label or ""
@@ -457,8 +464,7 @@ def update_filter(payload: EditFilterPayload) -> dict[str, Any]:
     if peeloff_win <= 0:
         peeloff_win = DEFAULT_PEEL_OFF_WIN_SEC
     use_peeloff = payload.use_peeloff
-    flagged_raw = payload.flagged or []
-    flagged = [bool(f) for f in flagged_raw] if flagged_raw else []
+    flagged = _normalize_flagged(payload.flagged, len(distimes))
 
     view_start = payload.view_start
     view_end = payload.view_end
@@ -533,6 +539,11 @@ def update_filter(payload: EditFilterPayload) -> dict[str, Any]:
     artifact_times = [int(x) for x in artifact_times_raw if isinstance(x, (int, float))]
 
     bids_emg_offset = view_start if emg_is_presliced else 0
+    if view_start - bids_emg_offset < 0 or view_end - bids_emg_offset > emg.shape[1]:
+        raise HTTPException(
+            status_code=400,
+            detail="view window exceeds available EMG samples",
+        )
     lock_spikes = payload.lock_spikes
     pt, updated = update_motor_unit_filter_window(
         emg,
@@ -547,7 +558,7 @@ def update_filter(payload: EditFilterPayload) -> dict[str, Any]:
             for i in range(len(distimes))
             if i != mu_index
             and mu_grid_index[i] == grid_index
-            and not (i < len(flagged) and flagged[i])
+            and not flagged[i]
         ],
         peeloff_win=peeloff_win,
         emg_offset=bids_emg_offset,
@@ -595,7 +606,7 @@ def add_spikes(payload: EditRoiPayload) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="fsamp is required")
     x_start = payload.x_start
     x_end = payload.x_end
-    y_min = payload.y_min or 0.0
+    y_min = payload.y_min if payload.y_min is not None else float("inf")
     mu_index = payload.mu_index
     if mu_index < 0 or mu_index >= len(distimes):
         raise HTTPException(status_code=400, detail="mu_index out of range")
@@ -615,7 +626,7 @@ def add_artifact(payload: EditRoiPayload) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="fsamp is required")
     x_start = payload.x_start
     x_end = payload.x_end
-    y_min = payload.y_min or 0.0
+    y_min = payload.y_min if payload.y_min is not None else float("inf")
 
     artifact_times_raw = payload.artifact_times or []
     artifact_times = [int(x) for x in artifact_times_raw if isinstance(x, (int, float))]
@@ -671,7 +682,7 @@ def delete_dr(payload: EditRoiPayload) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="fsamp is required")
     x_start = payload.x_start
     x_end = payload.x_end
-    y_min = payload.y_min or 0.0
+    y_min = payload.y_min if payload.y_min is not None else float("inf")
     mu_index = payload.mu_index
     if mu_index < 0 or mu_index >= len(distimes):
         raise HTTPException(status_code=400, detail="mu_index out of range")
@@ -697,7 +708,7 @@ def remove_outliers(payload: EditOutliersPayload) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="mu_index out of range")
 
     pulse = np.array(pulse_train, dtype=float)
-    source = distimes[mu_index]
+    source = sorted({int(x) for x in distimes[mu_index]})
     updated = remove_discharge_rate_outliers(pulse, source, fsamp)
     removed = max(0, len(source) - len(updated))
     return make_json_safe({"distimes": updated, "removed_count": removed})
@@ -726,7 +737,7 @@ def remove_duplicates_service(payload: EditDeduplicatePayload) -> dict[str, Any]
             "distimes": distimes,
         })
 
-    dup_tol = float(parameters.get("duplicatesthresh", 0.3))
+    dup_tol = _coerce_dup_tol(parameters.get("duplicatesthresh", 0.3))
     _, dedup_distimes, kept_idx = _dedup(pulse_trains, distimes, dup_tol, fsamp)
     dedup_distimes_clean = [
         sorted({int(v) for v in np.asarray(d, dtype=int).tolist() if int(v) >= 0})
@@ -740,9 +751,10 @@ def remove_duplicates_service(payload: EditDeduplicatePayload) -> dict[str, Any]
 
 
 def flag_mu(payload: EditFlagPayload) -> dict[str, Any]:
-    """Validate MU index and return flag status without mutating spike times."""
+    """Validate MU index and return the requested flag status without mutating spike times."""
     distimes = normalize_distimes(payload.distimes or [])
     mu_index = payload.mu_index
     if mu_index < 0 or mu_index >= len(distimes):
         raise HTTPException(status_code=400, detail="mu_index out of range")
-    return make_json_safe({"flagged": True})
+    flagged = True if payload.flag is None else bool(payload.flag)
+    return make_json_safe({"flagged": flagged})

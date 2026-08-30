@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
 
 def _expected_grid_count(loaded: dict[str, Any]) -> int:
     count = 0
@@ -28,8 +30,7 @@ def _pad_grid_names(names: list[str], expected_count: int, fallback: list[str]) 
         out = [str(x).strip() for x in (fallback or []) if str(x).strip()]
     target_count = max(int(expected_count or 0), len(out))
     while len(out) < target_count:
-        fill = out[-1] if out else f"Grid {len(out) + 1}"
-        out.append(fill)
+        out.append(f"Grid {len(out) + 1}")
     return out
 
 
@@ -64,7 +65,19 @@ def _generate_mu_uids(mu_grid_index: list[int]) -> list[str]:
 def _normalize_mu_grid_index(raw: Any, nmu: int) -> list[int]:
     if not isinstance(raw, (list, tuple)):
         return [0] * nmu
-    vals = [int(x) for x in raw[:nmu]]
+    vals: list[int] = []
+    for x in raw[:nmu]:
+        try:
+            vals.append(int(x))
+        except (TypeError, ValueError):
+            vals.append(0)
     if len(vals) < nmu:
         vals.extend([0] * (nmu - len(vals)))
     return vals
+
+
+def _coerce_dup_tol(raw: Any, default: float = 0.3) -> float:
+    """Coerce a ``duplicatesthresh`` parameter to float, unwrapping nested lists."""
+    while isinstance(raw, (list, tuple, np.ndarray)) and np.ndim(raw) > 0:
+        raw = raw[0] if len(raw) > 0 else default
+    return float(raw)

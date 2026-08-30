@@ -49,7 +49,11 @@ def _recompute_spikes_in_window(
     if win_len <= 2 * edge:
         return None, spike_times
 
-    window_emg = emg[:, start - emg_offset : end - emg_offset]
+    slice_start = start - emg_offset
+    slice_end = end - emg_offset
+    if slice_start < 0 or slice_end > emg.shape[1]:
+        return None, spike_times
+    window_emg = emg[:, slice_start:slice_end]
     window_emg = bandpass_signals(window_emg, fsamp)
 
     spikes_arr = np.asarray(spike_times, dtype=int)
@@ -99,10 +103,7 @@ def _recompute_spikes_in_window(
     if len(np.unique(labels)) < 2:
         return None, spike_times
     idx2 = int(np.argmax(centroids))
-    spikes_new = spikes_new[pt[spikes_new] <= 3 * centroids[idx2]]
 
-    spikes_new = spikes_new.astype(int)
-    
     if lock_spikes and spikes1.size > 0:
         # Realign original spikes to their exact peak positions within ±10 samples
         realigned_spikes = []
@@ -119,7 +120,10 @@ def _recompute_spikes_in_window(
         # Merge realigned original spikes with newly detected spikes
         merged_spikes = sorted(set(realigned_spikes) | set(spikes_new.tolist()))
         spikes_new = np.array(merged_spikes, dtype=int)
-    
+
+    spikes_new = spikes_new[pt[spikes_new] <= 3 * centroids[idx2]]
+    spikes_new = spikes_new.astype(int)
+
     updated = [s for s in spike_times if s < start + edge or s >= end - edge]
     updated.extend((spikes_new + start).tolist())
     updated = sorted({int(x) for x in updated if x >= 0})
