@@ -3,29 +3,38 @@
 from __future__ import annotations
 
 import numpy as np
-from scipy.cluster.vq import kmeans2
 from scipy.linalg import eigh, inv
-from scipy.signal import find_peaks
+
+from muedit.signal.decomp_primitives import (
+    DECOMP_MIN_ISI_SEC,
+    extend_signal,
+    find_refractory_peaks,
+    isi_cov,
+    signed_square,
+    split_by_amplitude,
+)
 
 _FIXED_POINT_TOL = 1e-4
 _FIXED_POINT_MAXITER = 500
-_MIN_ISI_SEC = 0.02
+_MIN_ISI_SEC = DECOMP_MIN_ISI_SEC
 _KMEANS_ITER = 10
 DEDUP_MAXLAG_RATIO: int = 40
 DEDUP_JITTER: float = 0.00025
 
-
-def extend_signal(signal: np.ndarray, exfactor: int) -> np.ndarray:
-    """Create delayed channel extension used by convolutive source separation."""
-    rows, cols = signal.shape
-    extended_rows = rows * exfactor
-    extended_cols = cols + exfactor - 1
-    esample = np.zeros((extended_rows, extended_cols))
-
-    for m in range(exfactor):
-        esample[m * rows : (m + 1) * rows, m : cols + m] = signal
-
-    return esample
+__all__ = [
+    "DEDUP_JITTER",
+    "DEDUP_MAXLAG_RATIO",
+    "batch_process_filters",
+    "compute_silhouette",
+    "extend_signal",
+    "fixed_point_alg",
+    "get_spikes",
+    "minimize_isi_covariance",
+    "pca_extended_signal",
+    "rem_duplicates",
+    "subtract_mu_waveforms",
+    "whiten_extended_signal",
+]
 
 
 def pca_extended_signal(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -121,14 +130,12 @@ def fixed_point_alg(
 def _pulse_train(w: np.ndarray, x: np.ndarray) -> np.ndarray:
     """Project source and apply signed-squared nonlinearity."""
     wtx = w.T @ x
-    return (wtx * np.abs(wtx)).flatten()
+    return signed_square(wtx).flatten()
 
 
 def _detect_peaks(icasig: np.ndarray, fsamp: float) -> np.ndarray:
     """Detect candidate spikes with refractory-distance peak picking."""
-    distance = int(np.round(fsamp * _MIN_ISI_SEC))
-    spikes, _ = find_peaks(icasig, distance=distance)
-    return spikes
+    return find_refractory_peaks(icasig, fsamp, min_isi_sec=_MIN_ISI_SEC)
 
 
 def get_spikes(
@@ -143,11 +150,7 @@ def get_spikes(
     if len(spikes) <= 1:
         return icasig, np.asarray(spikes, dtype=int)
 
-    centroids, labels = kmeans2(
-        icasig[spikes], 2, iter=_KMEANS_ITER, minit="++", missing="raise", seed=0
-    )
-    idx2 = int(np.argmax(centroids))
-    spikes2 = spikes[labels == idx2]
+    spikes2, _, _ = split_by_amplitude(icasig, spikes, kmeans_iter=_KMEANS_ITER)
 
     vals = icasig[spikes2]
     threshold = np.mean(vals) + 3 * np.std(vals)
@@ -178,8 +181,7 @@ def minimize_isi_covariance(
         if len(spikes) < 2:
             break
 
-        isi = np.diff(spikes) / fsamp
-        cov = np.std(isi) / np.mean(isi)
+        cov = isi_cov(spikes, fsamp)
 
         w = np.sum(x[:, spikes], axis=1)
 
@@ -201,13 +203,10 @@ def compute_silhouette(
     if len(spikes) <= 1:
         return icasig, np.array(spikes, dtype=int), 0.0
 
-    centroids, labels = kmeans2(
-        icasig[spikes], 2, iter=_KMEANS_ITER, minit="++", missing="raise", seed=0
-    )
+    spikes2, centroids, labels = split_by_amplitude(icasig, spikes, kmeans_iter=_KMEANS_ITER)
 
     idx2 = int(np.argmax(centroids))
     other_idx = 1 - idx2
-    spikes2 = spikes[labels == idx2]
 
     spike_cluster_vals = icasig[spikes][labels == idx2]
     within = float(np.sum((spike_cluster_vals - centroids[idx2]) ** 2))
@@ -329,16 +328,14 @@ def batch_process_filters(
                         valid_len = ltime - start
                         pulse_t[mu_nb, start:ltime] = pt_segment[:valid_len]
 
-            pulse_t[mu_nb, :] = pulse_t[mu_nb, :] * np.abs(pulse_t[mu_nb, :])
-            distance = int(np.round(fsamp * _MIN_ISI_SEC))
-            spikes, _ = find_peaks(pulse_t[mu_nb, :], distance=distance)
+            pulse_t[mu_nb, :] = signed_square(pulse_t[mu_nb, :])
+            spikes = find_refractory_peaks(pulse_t[mu_nb, :], fsamp, min_isi_sec=_MIN_ISI_SEC)
 
             if len(spikes) > 1:
-                centroids, labels = kmeans2(
-                    pulse_t[mu_nb, spikes], 2, iter=10, minit="++", missing="raise", seed=0
+                high_spikes, _, _ = split_by_amplitude(
+                    pulse_t[mu_nb, :], spikes, kmeans_iter=_KMEANS_ITER
                 )
-                idx = np.argmax(centroids)
-                distime.append(spikes[labels == idx])
+                distime.append(high_spikes)
             else:
                 distime.append(spikes)
 
@@ -439,11 +436,7 @@ def rem_duplicates(
         covs = []
         for idx_dup in duplicates:
             spikes = distime[idx_dup]
-            if len(spikes) > 1:
-                isi = np.diff(spikes)
-                cov = np.std(isi) / np.mean(isi) if np.mean(isi) > 0 else 100
-            else:
-                cov = 100
+            cov = isi_cov(spikes, 1.0, fallback=100.0)
             covs.append(cov)
 
         best_idx_local = int(np.argmin(covs))

@@ -7,6 +7,17 @@ from typing import Any
 
 import numpy as np
 
+#: Default number of extension channels used to derive the convolutive
+#: extension factor (``ex_factor = nbextchan / n_channels``). Shared by the
+#: offline decomposition parameters, the editing endpoints, and the CLI so the
+#: default stays consistent across entry points.
+DEFAULT_NBEXTCHAN: int = 1000
+
+#: Default peel-off window (seconds) for MU waveform subtraction. Shared by the
+#: decomposition parameters, the editing endpoints, the API schema, and the CLI
+#: (which expresses it in milliseconds as ``DEFAULT_PEEL_OFF_WIN_SEC * 1000``).
+DEFAULT_PEEL_OFF_WIN_SEC: float = 0.025
+
 
 @dataclass
 class DecompositionParameters:
@@ -19,15 +30,15 @@ class DecompositionParameters:
     peel_off_enabled: bool = False
     covfilter: bool = False
     duplicatesbgrids: bool = False
-    nbextchan: int = 1000
+    nbextchan: int = DEFAULT_NBEXTCHAN
     edges_sec: float = 0.2
     contrast_func: str = "skew"
     sil_thr: float = 0.88
     cov_thr: float = 0.5
-    peel_off_win: float = 0.025
+    peel_off_win: float = DEFAULT_PEEL_OFF_WIN_SEC
     duplicatesthresh: float = 0.3
     use_adaptive: bool = False
-    adapt_batch_ms: int = 1000
+    adapt_batch_ms: int = 100
     adapt_wh: bool = True
     adapt_sv: bool = True
     full_trace: bool = False

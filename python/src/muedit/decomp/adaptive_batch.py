@@ -3,10 +3,24 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Literal
 
 import numpy as np
-from scipy.signal import find_peaks
+
+from muedit.adapt_decomp.config import Config
+from muedit.signal.decomp_primitives import (
+    POSTPROC_MIN_ISI_SEC,
+    extend_signal,
+    find_refractory_peaks,
+    signed_square,
+    split_by_amplitude,
+)
+
+# Single source of truth for the adaptive hyperparameter defaults: the public
+# ``adaptive_batch_process`` signature reads these so the defaults stay in sync
+# with :class:`muedit.adapt_decomp.config.Config` instead of being re-typed.
+_DEFAULT_CONFIG = Config()
 
 
 def _compute_calibration_stats(
@@ -15,21 +29,18 @@ def _compute_calibration_stats(
     fsamp: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Project the whitened calibration signal through MU filters and derive spike centroids."""
-    from scipy.cluster.vq import kmeans2
-
     n_mu = mu_filters.shape[1]
     ipts_calib = (w_sig.T @ mu_filters).astype(np.float32)
-    ipts_sq    = ipts_calib * np.abs(ipts_calib)
+    ipts_sq    = signed_square(ipts_calib)
 
     base_centr   = np.zeros(n_mu, dtype=np.float32)
     spikes_centr = np.ones(n_mu, dtype=np.float32)
 
-    dist = int(round(fsamp * 0.005))
     for j in range(n_mu):
         pt = ipts_sq[:, j]
-        peaks, _ = find_peaks(pt, distance=dist)
+        peaks = find_refractory_peaks(pt, fsamp, min_isi_sec=POSTPROC_MIN_ISI_SEC)
         if len(peaks) > 1:
-            centroids, labels = kmeans2(pt[peaks], 2, iter=10, minit="++", missing="raise", seed=0)
+            _, centroids, _ = split_by_amplitude(pt, peaks)
             hi = int(np.argmax(centroids))
             spikes_centr[j] = float(centroids[hi])
             base_centr[j]   = float(centroids[1 - hi])
@@ -46,37 +57,17 @@ def _run_one_pass(
     mu_filters: np.ndarray,
     base_centr: np.ndarray,
     spikes_centr: np.ndarray,
-    fsamp: float,
     ex_factor: int,
-    batch_ms: int,
-    adapt_wh: bool,
-    adapt_sv: bool,
-    adapt_sd: bool = True,
-    wh_learning_rate: float = 7e-3,
-    sv_learning_rate: float = 3e-3,
-    cov_alpha: float = 0.1,
-    spike_prev_weight: int = 5,
-    contrast_func: Literal["logcosh", "cube"] = "logcosh",
-    compute_loss: bool = False,
+    config: Config,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    """Run adaptive decomposition on a single EMG segment and return ipts, spikes, and losses."""
-    from muedit.adapt_decomp.adaptation import run_adaptive_decomposition
-    from muedit.adapt_decomp.config import Config
+    """Run adaptive decomposition on a single EMG segment and return ipts, spikes, and losses.
 
-    config = Config(
-        fsamp=int(fsamp),
-        ex_factor=ex_factor,
-        batch_ms=batch_ms,
-        adapt_wh=adapt_wh,
-        adapt_sv=adapt_sv,
-        adapt_sd=adapt_sd,
-        wh_learning_rate=wh_learning_rate,
-        sv_learning_rate=sv_learning_rate,
-        cov_alpha=cov_alpha,
-        spike_prev_weight=spike_prev_weight,
-        contrast_func=contrast_func,
-        compute_loss=compute_loss,
-    )
+    ``ex_factor`` varies per pass (the backward pass uses 1 because its input is
+    already extended), so it overrides ``config.ex_factor`` via :func:`dataclasses.replace`.
+    """
+    from muedit.adapt_decomp.adaptation import run_adaptive_decomposition
+
+    cfg = replace(config, ex_factor=ex_factor)
     ipts, spikes, losses = run_adaptive_decomposition(
         emg=emg_seg.astype(np.float32),
         whitening=whiten_mat.astype(np.float32),
@@ -84,7 +75,7 @@ def _run_one_pass(
         base_centr=base_centr.copy(),
         spikes_centr=spikes_centr.copy(),
         emg_calib=emg_calib.astype(np.float32),
-        config=config,
+        config=cfg,
     )
     return ipts.astype(np.float64), spikes, losses
 
@@ -95,46 +86,16 @@ def _run_adapt_decomp_bidirectional(
     whiten_mat: np.ndarray,
     mu_filters: np.ndarray,
     w_sig: np.ndarray,
-    fsamp: float,
-    batch_ms: int,
-    adapt_wh: bool,
-    adapt_sv: bool,
     calib_start: int,
-    adapt_sd: bool = True,
-    wh_learning_rate: float = 7e-3,
-    sv_learning_rate: float = 3e-3,
-    cov_alpha: float = 0.1,
-    spike_prev_weight: int = 5,
-    contrast_func: Literal["logcosh", "cube"] = "logcosh",
-    compute_loss: bool = False,
+    config: Config,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Run adaptive decomposition forward from calib_start and, if needed, backward over the pre-calibration segment."""
-    from muedit.decomp.algorithm import extend_signal
-
     base_centr, spikes_centr = _compute_calibration_stats(
-        w_sig, mu_filters, fsamp
+        w_sig, mu_filters, config.fsamp
     )
 
     ex_factor = w_sig.shape[0] // win_data_g.shape[0]
-    bs = int(batch_ms * fsamp / 1000)
-
-    shared = dict(
-        whiten_mat=whiten_mat,
-        mu_filters=mu_filters,
-        base_centr=base_centr,
-        spikes_centr=spikes_centr,
-        fsamp=fsamp,
-        batch_ms=batch_ms,
-        adapt_wh=adapt_wh,
-        adapt_sv=adapt_sv,
-        adapt_sd=adapt_sd,
-        wh_learning_rate=wh_learning_rate,
-        sv_learning_rate=sv_learning_rate,
-        cov_alpha=cov_alpha,
-        spike_prev_weight=spike_prev_weight,
-        contrast_func=contrast_func,
-        compute_loss=compute_loss,
-    )
+    bs = config.batch_size
 
     emg_calib_raw = win_data_g.T.astype(np.float32)
     n_calib = win_data_g.shape[1]
@@ -145,8 +106,12 @@ def _run_adapt_decomp_bidirectional(
     ipts_fwd_full, spikes_fwd_full, losses_fwd = _run_one_pass(
         emg_seg=emg_fwd,
         emg_calib=emg_calib_raw,
+        whiten_mat=whiten_mat,
+        mu_filters=mu_filters,
+        base_centr=base_centr,
+        spikes_centr=spikes_centr,
         ex_factor=ex_factor,
-        **shared,
+        config=config,
     )
     ipts_fwd   = ipts_fwd_full[calib_start - fwd_start:]
     spikes_fwd = spikes_fwd_full[calib_start - fwd_start:]
@@ -165,8 +130,12 @@ def _run_adapt_decomp_bidirectional(
     ipts_bwd_rev, spikes_bwd_rev, losses_bwd_rev = _run_one_pass(
         emg_seg=emg_bwd,
         emg_calib=emg_calib_ext,
+        whiten_mat=whiten_mat,
+        mu_filters=mu_filters,
+        base_centr=base_centr,
+        spikes_centr=spikes_centr,
         ex_factor=1,
-        **shared,
+        config=config,
     )
 
     # Re-split at the reversed block boundaries: when calib_start % bs != 0 the
@@ -180,7 +149,7 @@ def _run_adapt_decomp_bidirectional(
     spikes_bwd = np.concatenate(out_spikes[::-1], axis=0)
 
     losses: dict[str, Any] = {}
-    if compute_loss and losses_fwd:
+    if config.compute_loss and losses_fwd:
         # Backward losses are indexed by fixed-stride batches in the reversed
         # segment. A plain reversal restores original-time order only when
         # blocks align with batch strides (calib_start % bs == 0); otherwise
@@ -238,19 +207,40 @@ def adaptive_batch_process(
     ltime: int,
     fsamp: float,
     nwindows_per_grid: int,
-    batch_ms: int = 100,
-    adapt_wh: bool = True,
-    adapt_sv: bool = True,
-    adapt_sd: bool = True,
-    wh_learning_rate: float = 7e-3,
-    sv_learning_rate: float = 3e-3,
-    cov_alpha: float = 0.1,
-    spike_prev_weight: int = 5,
-    contrast_func: Literal["logcosh", "cube"] = "logcosh",
-    compute_loss: bool = False,
+    batch_ms: int = _DEFAULT_CONFIG.batch_ms,
+    adapt_wh: bool = _DEFAULT_CONFIG.adapt_wh,
+    adapt_sv: bool = _DEFAULT_CONFIG.adapt_sv,
+    adapt_sd: bool = _DEFAULT_CONFIG.adapt_sd,
+    wh_learning_rate: float = _DEFAULT_CONFIG.wh_learning_rate,
+    sv_learning_rate: float = _DEFAULT_CONFIG.sv_learning_rate,
+    cov_alpha: float = _DEFAULT_CONFIG.cov_alpha,
+    spike_prev_weight: int = _DEFAULT_CONFIG.spike_prev_weight,
+    contrast_func: Literal["logcosh", "cube"] = _DEFAULT_CONFIG.contrast_func,
+    compute_loss: bool = _DEFAULT_CONFIG.compute_loss,
 ) -> tuple[np.ndarray, list[np.ndarray], dict[str, Any]]:
-    """Apply adaptive post-processing across all decomposition windows and grids."""
+    """Apply adaptive post-processing across all decomposition windows and grids.
+
+    The adaptive hyperparameter defaults are sourced from
+    :class:`muedit.adapt_decomp.config.Config` (via ``_DEFAULT_CONFIG``) so they
+    stay in sync with the standalone adaptive path. They are folded into a
+    single :class:`Config` here and threaded through the inner helpers, rather
+    than re-declared at each call level.
+    """
     from muedit.signal.filters import demean
+
+    config = Config(
+        fsamp=int(fsamp),
+        batch_ms=batch_ms,
+        adapt_wh=adapt_wh,
+        adapt_sv=adapt_sv,
+        adapt_sd=adapt_sd,
+        wh_learning_rate=wh_learning_rate,
+        sv_learning_rate=sv_learning_rate,
+        cov_alpha=cov_alpha,
+        spike_prev_weight=spike_prev_weight,
+        contrast_func=contrast_func,
+        compute_loss=compute_loss,
+    )
 
     total_mus = sum(f.shape[1] for f in mu_filters_by_window.values() if f.size > 0)
     if total_mus == 0:
@@ -277,25 +267,15 @@ def adaptive_batch_process(
             whiten_mat=whiten_mats[nwin],
             mu_filters=filters,
             w_sig=w_sig_by_window[nwin],
-            fsamp=fsamp,
-            batch_ms=batch_ms,
-            adapt_wh=adapt_wh,
-            adapt_sv=adapt_sv,
             calib_start=calib_start,
-            adapt_sd=adapt_sd,
-            wh_learning_rate=wh_learning_rate,
-            sv_learning_rate=sv_learning_rate,
-            cov_alpha=cov_alpha,
-            spike_prev_weight=spike_prev_weight,
-            contrast_func=contrast_func,
-            compute_loss=compute_loss,
+            config=config,
         )
 
         if compute_loss and win_losses:
             all_losses[nwin] = win_losses
 
         for j in range(filters.shape[1]):
-            pt = ipts_out[:, j] * np.abs(ipts_out[:, j])
+            pt = signed_square(ipts_out[:, j])
             pulse_t[mu_nb, :] = pt[:ltime]
             distime.append(np.where(spikes_out[:ltime, j] > 0)[0].astype(int))
             mu_nb += 1

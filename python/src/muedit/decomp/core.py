@@ -20,6 +20,7 @@ from muedit.decomp.algorithm import (
     whiten_extended_signal,
 )
 from muedit.decomp.types import DecomposeStepOutput, DecompositionParameters, PreprocessStepOutput
+from muedit.signal.decomp_primitives import isi_cov
 from muedit.signal.filters import demean
 
 logger = logging.getLogger(__name__)
@@ -112,8 +113,7 @@ def decompose_step(
                 _, spikes = get_spikes(w, x, prep.fsamp)
 
                 if len(spikes) > 10:
-                    isi = np.diff(spikes) / prep.fsamp
-                    cov_val = np.std(isi) / np.mean(isi)
+                    cov_val = isi_cov(spikes, prep.fsamp)
                     cov_scores[j] = cov_val
                     w_ini = np.sum(x[:, spikes], axis=1)
                     w_final, spikes_final, cov_final = minimize_isi_covariance(

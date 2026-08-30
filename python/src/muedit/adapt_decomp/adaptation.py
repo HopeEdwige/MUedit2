@@ -6,20 +6,15 @@ import logging
 from typing import Any
 
 import numpy as np
-from scipy.signal import find_peaks
 
 from muedit.adapt_decomp.config import Config
+from muedit.signal.decomp_primitives import (
+    extend_signal,
+    find_refractory_peaks,
+    signed_square,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def _extend_signal(emg: np.ndarray, extension_factor: int) -> np.ndarray:
-    """Delay-embedding extension. No-op when extension_factor=1."""
-    n_samples, n_channels = emg.shape
-    output = np.zeros((n_samples, n_channels * extension_factor), dtype=emg.dtype)
-    for i in range(extension_factor):
-        output[i :, n_channels * i : n_channels * (i + 1)] = emg[: n_samples - i]
-    return output
 
 
 class AdaptiveDecomp:
@@ -45,7 +40,9 @@ class AdaptiveDecomp:
         self.n_extended = whitening.shape[0]
         self.identity = np.eye(self.n_extended, dtype=np.float32)
 
-        self.emg_extended = _extend_signal(emg.astype(np.float32), config.ex_factor)
+        self.emg_extended = extend_signal(
+            emg.astype(np.float32), config.ex_factor, samples_first=True
+        )
 
         self._init_whitening_calibration(emg_calib.astype(np.float32), config)
         if config.compute_loss:
@@ -61,7 +58,7 @@ class AdaptiveDecomp:
         self, emg_calib: np.ndarray, config: Config
     ) -> None:
         """Initialise whitening covariance from calibration batches and compute KL divergence stats."""
-        emg_extended = _extend_signal(emg_calib, config.ex_factor)
+        emg_extended = extend_signal(emg_calib, config.ex_factor, samples_first=True)
         whitened_emg = emg_extended @ self.whitening.T
         self.whitening_covariance = np.cov(whitened_emg.T).astype(np.float32)
 
@@ -89,7 +86,7 @@ class AdaptiveDecomp:
         self, emg_calib: np.ndarray, config: Config
     ) -> None:
         """Compute contrast calibration stats (mean/std per MU) from the calibration segment."""
-        emg_extended = _extend_signal(emg_calib, config.ex_factor)
+        emg_extended = extend_signal(emg_calib, config.ex_factor, samples_first=True)
         whitened = self.whitening @ emg_extended.T  # (n_extended, n_calib)
 
         batch_size = config.batch_size
@@ -100,7 +97,7 @@ class AdaptiveDecomp:
             start = b * batch_size
             end   = (b + 1) * batch_size
             ipts_batch = (self.sep_vectors @ whitened[:, start:end]).T  # (batch, n_mu)
-            ipts_sq    = ipts_batch * np.abs(ipts_batch)
+            ipts_sq    = signed_square(ipts_batch)
             spikes_batch = self._detect_spikes(ipts_sq, update_centroids=False)
             contrast = self._contrast_value(ipts_batch, spikes_batch)
             contrast_values.append(contrast)
@@ -139,7 +136,7 @@ class AdaptiveDecomp:
 
             whitened_batch = self._whiten(self.emg_extended[start_idx + skip : end_idx])
             ipts_batch     = self._separate(whitened_batch)
-            ipts_sq        = ipts_batch * np.abs(ipts_batch)
+            ipts_sq        = signed_square(ipts_batch)
             spikes_batch   = self._detect_spikes(ipts_sq, update_centroids=True)
 
             if self.config.compute_loss:
@@ -167,7 +164,7 @@ class AdaptiveDecomp:
             # adaptation still run on the tail samples.
             whitened_batch = self.whitening @ self.emg_extended[start_idx:].T
             ipts_batch = (self.sep_vectors @ whitened_batch).T
-            ipts_sq = ipts_batch * np.abs(ipts_batch)
+            ipts_sq = signed_square(ipts_batch)
             spikes_batch = self._detect_spikes(ipts_sq, update_centroids=True)
             if self.config.adapt_sv:
                 self._update_separation_vectors(whitened_batch, ipts_batch, spikes_batch)
@@ -215,9 +212,10 @@ class AdaptiveDecomp:
         for unit_idx in range(self.n_motor_units):
             min_h = float(self.base_centr[unit_idx] / self.config.spike_height_mult)
             max_h = float(self.config.spike_height_mult * self.spikes_centr[unit_idx])
-            peak_indices, _ = find_peaks(
+            peak_indices = find_refractory_peaks(
                 ipts_squared[:, unit_idx],
-                distance=self.config.spike_dist,
+                self.config.fsamp,
+                min_isi_sec=self.config.spike_dist_ms / 1000.0,
                 height=(min_h, max_h),
             )
 

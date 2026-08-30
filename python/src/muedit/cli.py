@@ -13,7 +13,7 @@ import uvicorn
 from muedit.api.app_factory import create_app
 from muedit.api.routes import include_routers
 from muedit.decomp.pipeline import run_decomposition
-from muedit.decomp.types import DecompositionParameters
+from muedit.decomp.types import DEFAULT_NBEXTCHAN, DEFAULT_PEEL_OFF_WIN_SEC, DecompositionParameters
 
 
 def _parse_roi(value: str) -> tuple[int, int]:
@@ -138,7 +138,7 @@ def run_decomposition_cli() -> None:
     parser.add_argument(
         "--peel-off-window-ms",
         type=float,
-        default=25.0,
+        default=DEFAULT_PEEL_OFF_WIN_SEC * 1000,
         help="Peel-off window in milliseconds (app setting: Window (ms)).",
     )
     parser.add_argument(
@@ -247,7 +247,7 @@ def run_decomposition_cli() -> None:
     params = DecompositionParameters(
         niter=args.niter,
         nwindows=args.nwindows,
-        nbextchan=1000,
+        nbextchan=DEFAULT_NBEXTCHAN,
         duplicatesthresh=args.duplicatesthresh,
         sil_thr=(float("-inf") if not args.sil_filter else args.sil_thr),
         cov_thr=args.cov_thr,

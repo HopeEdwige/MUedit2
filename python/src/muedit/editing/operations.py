@@ -5,14 +5,19 @@ from __future__ import annotations
 from typing import TypeAlias
 
 import numpy as np
-from scipy.cluster.vq import kmeans2
-from scipy.signal import find_peaks
 
 from muedit.decomp.algorithm import (
     extend_signal,
     pca_extended_signal,
     subtract_mu_waveforms,
     whiten_extended_signal,
+)
+from muedit.decomp.types import DEFAULT_NBEXTCHAN, DEFAULT_PEEL_OFF_WIN_SEC
+from muedit.signal.decomp_primitives import (
+    POSTPROC_MIN_ISI_SEC,
+    find_refractory_peaks,
+    signed_square,
+    split_by_amplitude,
 )
 from muedit.signal.filters import bandpass_signals
 
@@ -29,7 +34,7 @@ def _recompute_spikes_in_window(
     end: int,
     nbextchan: int,
     peeloff_spike_times: list[SpikeTimes] | None = None,
-    peeloff_win: float = 0.025,
+    peeloff_win: float = DEFAULT_PEEL_OFF_WIN_SEC,
     emg_offset: int = 0,
     use_peeloff: bool = False,
     artifact_times: SpikeTimes | None = None,
@@ -85,19 +90,18 @@ def _recompute_spikes_in_window(
     pt = pt[: window_emg.shape[1]]
     pt[:edge] = 0
     pt[-edge:] = 0
-    pt = pt * np.abs(pt)
+    pt = signed_square(pt)
 
-    peaks, _ = find_peaks(pt, distance=int(round(fsamp * 0.005)))
+    peaks = find_refractory_peaks(pt, fsamp, min_isi_sec=POSTPROC_MIN_ISI_SEC)
     if peaks.size == 0:
         return None, spike_times
 
     if peaks.size <= 2:
         return None, spike_times
-    centroids, labels = kmeans2(pt[peaks], 2, iter=10, minit="++", missing="warn", seed=0)
+    spikes_new, centroids, labels = split_by_amplitude(pt, peaks, missing="warn")
     if len(np.unique(labels)) < 2:
         return None, spike_times
     idx2 = int(np.argmax(centroids))
-    spikes_new = peaks[labels == idx2]
     spikes_new = spikes_new[pt[spikes_new] <= 3 * centroids[idx2]]
 
     spikes_new = spikes_new.astype(int)
@@ -133,9 +137,9 @@ def update_motor_unit_filter_window(
     fsamp: float,
     start: int,
     end: int,
-    nbextchan: int = 1000,
+    nbextchan: int = DEFAULT_NBEXTCHAN,
     peeloff_spike_times: list[SpikeTimes] | None = None,
-    peeloff_win: float = 0.025,
+    peeloff_win: float = DEFAULT_PEEL_OFF_WIN_SEC,
     emg_offset: int = 0,
     use_peeloff: bool = False,
     artifact_times: SpikeTimes | None = None,
@@ -172,8 +176,7 @@ def add_spikes_in_roi(
     temp = pulse.copy()
     mask = (np.arange(len(temp)) >= x_start) & (np.arange(len(temp)) <= x_end)
     temp[~mask] = 0
-    distance = int(round(fsamp * 0.005))
-    peaks, _ = find_peaks(temp, height=y_min, distance=distance)
+    peaks = find_refractory_peaks(temp, fsamp, min_isi_sec=POSTPROC_MIN_ISI_SEC, height=y_min)
     if peaks.size == 0:
         return sorted({int(x) for x in spike_times})
     updated = list(spike_times) + peaks.astype(int).tolist()
@@ -192,8 +195,7 @@ def add_artifact_in_roi(
     temp = pulse.copy()
     mask = (np.arange(len(temp)) >= x_start) & (np.arange(len(temp)) <= x_end)
     temp[~mask] = 0
-    distance = int(round(fsamp * 0.005))
-    peaks, _ = find_peaks(temp, height=y_min, distance=distance)
+    peaks = find_refractory_peaks(temp, fsamp, min_isi_sec=POSTPROC_MIN_ISI_SEC, height=y_min)
     if peaks.size == 0:
         return sorted({int(x) for x in artifact_times})
     updated = list(artifact_times) + peaks.astype(int).tolist()

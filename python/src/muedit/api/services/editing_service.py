@@ -54,6 +54,7 @@ from muedit.decomp.io import (
     normalize_distimes,
 )
 from muedit.decomp.postprocess import _save_npz_with_app_schema
+from muedit.decomp.types import DEFAULT_PEEL_OFF_WIN_SEC
 from muedit.editing.operations import (
     add_artifact_in_roi,
     add_spikes_in_roi,
@@ -454,7 +455,7 @@ def update_filter(payload: EditFilterPayload) -> dict[str, Any]:
     mu_grid_index = _normalize_mu_grid_index(payload.mu_grid_index, len(distimes))
     peeloff_win = payload.peel_off_win
     if peeloff_win <= 0:
-        peeloff_win = 0.025
+        peeloff_win = DEFAULT_PEEL_OFF_WIN_SEC
     use_peeloff = payload.use_peeloff
     flagged_raw = payload.flagged or []
     flagged = [bool(f) for f in flagged_raw] if flagged_raw else []

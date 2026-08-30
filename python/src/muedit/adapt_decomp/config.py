@@ -26,9 +26,7 @@ class Config:
     spike_height_mult: int = 3
     spike_prev_weight: int = 5
     spike_dist_ms: int = 5
-    spike_dist: int = field(init=False)
     batch_size: int = field(init=False)
 
     def __post_init__(self) -> None:
-        self.spike_dist = int(self.spike_dist_ms * self.fsamp / 1000)
         self.batch_size = int(self.batch_ms * self.fsamp / 1000)
