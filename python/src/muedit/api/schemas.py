@@ -122,3 +122,4 @@ class EditFlagPayload(BaseModel):
 
     distimes: list[list[int]]
     mu_index: int = 0
+    flag: bool | None = None
