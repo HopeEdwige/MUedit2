@@ -48,7 +48,11 @@ def pca_extended_signal(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     else:
         lower_limit_value = rank_tolerance
 
-    mask = eigenvalues > lower_limit_value
+    mask = eigenvalues > max(lower_limit_value, 1e-10 * eigenvalues[0])
+    if not mask.any():
+        raise ValueError(
+            "Degenerate window: covariance has no positive eigenvalues (flat channels?)"
+        )
     eigenvectors_selected = eigenvectors[:, mask]
     eigenvalues_diag = np.diag(eigenvalues[mask])
 
@@ -254,6 +258,7 @@ def batch_process_filters(
     nwindows_per_grid: int,
     whiten_mat_by_window: dict[int, np.ndarray] | None = None,
     full_extended_by_window: dict[int, np.ndarray] | None = None,
+    win_means_by_window: dict[int, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
     """Apply MU filters across windows and reconstruct pulse trains/spike times.
 
@@ -261,6 +266,12 @@ def batch_process_filters(
     each filter is dewhitened (``w @ W``) and projected onto the full extended
     signal of its window, producing pulse trains over the entire trace instead
     of only the decomposed windows.
+
+    ``full_extended_by_window`` holds the *raw* (non-demeaned) extended signal,
+    shared per grid. When ``win_means_by_window`` is also provided, the
+    per-window DC baseline is removed as a cheap additive correction so the
+    dewhitened filter is applied to the same baseline it was estimated on,
+    without building a per-window extended array.
     """
     total_mus = 0
     for nwin in mu_filters_by_window:
@@ -286,7 +297,24 @@ def batch_process_filters(
 
             if full_extended_by_window is not None and whiten_mat_by_window is not None:
                 w_dewhite = current_filter @ whiten_mat_by_window[nwin]
-                pt_full = w_dewhite @ full_extended_by_window[nwin]
+                raw_ext = full_extended_by_window[nwin]
+                pt_full = w_dewhite @ raw_ext
+                # Remove the window's per-channel DC baseline as an additive
+                # correction: w_dewhite @ extend(A - m) == w_dewhite @ extend(A)
+                # - corr, avoiding a per-window extended array.
+                if win_means_by_window is not None:
+                    win_mean = win_means_by_window[nwin]
+                    n_ch = win_mean.size
+                    ex_factor = w_dewhite.size // n_ch
+                    ext_cols = raw_ext.shape[1]
+                    n_samples = ext_cols - ex_factor + 1
+                    s = np.array(
+                        [w_dewhite[k * n_ch : (k + 1) * n_ch] @ win_mean for k in range(ex_factor)]
+                    )
+                    corr = np.zeros(ext_cols)
+                    for k in range(ex_factor):
+                        corr[k : n_samples + k] += s[k]
+                    pt_full = pt_full - corr
                 pulse_t[mu_nb, :ltime] = pt_full[:ltime]
             else:
                 for nwin2 in whitened_windows:
@@ -408,25 +436,24 @@ def rem_duplicates(
             if score >= tol:
                 duplicates.append(j)
 
-        if len(duplicates) > 0:
-            covs = []
-            for idx_dup in duplicates:
-                spikes = distime[idx_dup]
-                if len(spikes) > 1:
-                    isi = np.diff(spikes)
-                    cov = np.std(isi) / np.mean(isi) if np.mean(isi) > 0 else 100
-                else:
-                    cov = 100
-                covs.append(cov)
+        covs = []
+        for idx_dup in duplicates:
+            spikes = distime[idx_dup]
+            if len(spikes) > 1:
+                isi = np.diff(spikes)
+                cov = np.std(isi) / np.mean(isi) if np.mean(isi) > 0 else 100
+            else:
+                cov = 100
+            covs.append(cov)
 
-            best_idx_local = int(np.argmin(covs))
-            best_idx = duplicates[best_idx_local]
+        best_idx_local = int(np.argmin(covs))
+        best_idx = duplicates[best_idx_local]
 
-            distimenew.append(distime[best_idx])
-            pulsenew.append(pulse_t[best_idx, :])
-            kept_indices.append(best_idx)
+        distimenew.append(distime[best_idx])
+        pulsenew.append(pulse_t[best_idx, :])
+        kept_indices.append(best_idx)
 
-            for idx_dup in duplicates:
-                active_mus[idx_dup] = False
+        for idx_dup in duplicates:
+            active_mus[idx_dup] = False
 
     return np.array(pulsenew), distimenew, kept_indices

@@ -27,7 +27,6 @@ from muedit.decomp.types import (
     PreprocessStepOutput,
 )
 from muedit.models import DecompositionExport, DecompositionSignalExport
-from muedit.signal.filters import demean
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +166,10 @@ def postprocess_step(
                 keep_idx = np.where(mask == 0)[0]
                 grid_raw = prep.data[ch_idx_g + keep_idx, :]
                 ex_factor = int(round(params.nbextchan / max(1, grid_raw.shape[0])))
-                grid_full_ext[i] = demean(extend_signal(grid_raw, ex_factor))
+                # Raw (non-demeaned) extended signal, shared across the grid's
+                # windows. The per-window DC baseline is removed as an additive
+                # correction inside batch_process_filters via win_means.
+                grid_full_ext[i] = extend_signal(grid_raw, ex_factor)
                 ch_idx_g += n_ch_g
             for nwin in decomposed.mu_filters:
                 grid_idx = nwin // max(1, nwindows)
@@ -183,6 +185,7 @@ def postprocess_step(
             nwindows,
             whiten_mat_by_window=decomposed.whiten_mat if full_extended_by_window else None,
             full_extended_by_window=full_extended_by_window,
+            win_means_by_window=decomposed.win_means if full_extended_by_window else None,
         )
 
     pulse_t, distime, mu_grid_index = _remove_duplicates_by_grid(

@@ -73,6 +73,7 @@ class DecomposeStepOutput:
     coordinates_plateau: list[int]
     sil_by_window: dict[int, list[float]]
     mu_grid_index: list[int]
+    win_means: dict[int, np.ndarray]
 
 
 @dataclass

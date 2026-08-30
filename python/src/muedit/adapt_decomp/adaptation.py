@@ -159,9 +159,20 @@ class AdaptiveDecomp:
         remainder_samples = n_samples - n_batches * batch_size
         if remainder_samples > 0:
             start_idx = n_batches * batch_size
-            ipts_output[start_idx:] = (
-                self.sep_vectors @ (self.whitening @ self.emg_extended[start_idx:].T)
-            ).T
+            # The tail is often shorter than a full batch; np.cov on a
+            # 1-sample tail returns NaN (with RuntimeWarnings), which would
+            # poison whitening_covariance. Skip the whitening-covariance
+            # update here — run() returns immediately after, so the
+            # whitening matrix is never exposed. Spike detection and SV
+            # adaptation still run on the tail samples.
+            whitened_batch = self.whitening @ self.emg_extended[start_idx:].T
+            ipts_batch = (self.sep_vectors @ whitened_batch).T
+            ipts_sq = ipts_batch * np.abs(ipts_batch)
+            spikes_batch = self._detect_spikes(ipts_sq, update_centroids=True)
+            if self.config.adapt_sv:
+                self._update_separation_vectors(whitened_batch, ipts_batch, spikes_batch)
+            ipts_output[start_idx:] = ipts_batch
+            spikes_output[start_idx:] = spikes_batch
 
         losses: dict[str, Any] = {}
         if self.config.compute_loss:
