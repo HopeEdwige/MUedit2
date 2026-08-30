@@ -169,26 +169,54 @@ def _run_adapt_decomp_bidirectional(
         **shared,
     )
 
-    out_ipts   = np.split(ipts_bwd_rev,   split_pts, axis=0)
-    out_spikes = np.split(spikes_bwd_rev, split_pts, axis=0)
+    # Re-split at the reversed block boundaries: when calib_start % bs != 0 the
+    # last block is smaller, so the reversed concatenation has different split
+    # points than the original. Splitting at the original split_pts would
+    # scramble the time order.
+    rev_split_pts = list(np.cumsum([b.shape[0] for b in reversed(blocks)]))[:-1]
+    out_ipts   = np.split(ipts_bwd_rev,   rev_split_pts, axis=0)
+    out_spikes = np.split(spikes_bwd_rev, rev_split_pts, axis=0)
     ipts_bwd   = np.concatenate(out_ipts[::-1],   axis=0)
     spikes_bwd = np.concatenate(out_spikes[::-1], axis=0)
 
     losses: dict[str, Any] = {}
     if compute_loss and losses_fwd:
-        n_bwd = losses_bwd_rev.get("wh_loss", np.array([])).shape[0]
-        bwd_idx = list(range(n_bwd - 1, -1, -1))
+        # Backward losses are indexed by fixed-stride batches in the reversed
+        # segment. A plain reversal restores original-time order only when
+        # blocks align with batch strides (calib_start % bs == 0); otherwise
+        # the batches span non-contiguous original-time spans and no
+        # permutation is valid. The trailing remainder also gets no loss
+        # entry (n_batches = n_samples // bs), so n_bwd may be short by one.
+        bwd = losses_bwd_rev
+        if calib_start % bs == 0:
+            n_bwd = bwd.get("wh_loss", np.array([])).shape[0]
+            bwd_idx = list(range(n_bwd - 1, -1, -1))
+            bwd = {
+                "wh_loss": bwd["wh_loss"][bwd_idx],
+                "sv_loss": bwd["sv_loss"][bwd_idx],
+                "total_loss": bwd["total_loss"][bwd_idx],
+            }
+        else:
+            # Misaligned: no permutation restores original-time order, so emit
+            # NaNs rather than a plausible-but-wrong reversed-batch ordering.
+            n_bwd = bwd["wh_loss"].shape[0]
+            n_mu = bwd["sv_loss"].shape[1]
+            bwd = {
+                "wh_loss": np.full(n_bwd, np.nan, dtype=bwd["wh_loss"].dtype),
+                "sv_loss": np.full((n_bwd, n_mu), np.nan, dtype=bwd["sv_loss"].dtype),
+                "total_loss": np.full(n_bwd, np.nan, dtype=bwd["total_loss"].dtype),
+            }
         losses = {
             "wh_loss": np.concatenate([
-                losses_bwd_rev["wh_loss"][bwd_idx],
+                bwd["wh_loss"],
                 losses_fwd["wh_loss"],
             ]),
             "sv_loss": np.concatenate([
-                losses_bwd_rev["sv_loss"][bwd_idx],
+                bwd["sv_loss"],
                 losses_fwd["sv_loss"],
             ], axis=0),
             "total_loss": np.concatenate([
-                losses_bwd_rev["total_loss"][bwd_idx],
+                bwd["total_loss"],
                 losses_fwd["total_loss"],
             ]),
         }

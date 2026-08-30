@@ -21,6 +21,9 @@ LOADER_BIDS_META_KEYS: tuple[str, ...] = (
     "gains",
     "emg_hpf",
     "emg_lpf",
+    "aux_gains",
+    "aux_hpf",
+    "aux_lpf",
     "hardware_filters",
     "units",
     "recording_type",
@@ -672,6 +675,7 @@ def load_decomposition_signal_context(filepath: str) -> dict[str, Any] | None:
 
     signal: dict[str, Any] = {}
     top: dict[str, Any] = {}
+    is_v73 = False
     try:
         try:
             mat = scipy.io.loadmat(filepath, simplify_cells=True)
@@ -683,6 +687,7 @@ def load_decomposition_signal_context(filepath: str) -> dict[str, Any] | None:
     except (NotImplementedError, ValueError):
         if not h5py.is_hdf5(filepath):
             return None
+        is_v73 = True
         with h5py.File(filepath, "r") as h5f:
             if "signal" in h5f:
                 sig = _mat73_read(h5f["signal"], h5f)
@@ -699,7 +704,9 @@ def load_decomposition_signal_context(filepath: str) -> dict[str, Any] | None:
         data_arr = data_arr.reshape(1, -1)
     if data_arr.ndim != 2:
         return None
-    if data_arr.shape[0] > data_arr.shape[1]:
+    # MAT v7.3 (HDF5) stores 2D arrays transposed (column-major); h5py reads
+    # them as-stored. scipy.io.loadmat (v5) handles the transpose internally.
+    if is_v73:
         data_arr = data_arr.T
 
     fsamp_val = first_non_none(

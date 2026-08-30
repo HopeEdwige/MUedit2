@@ -80,11 +80,11 @@ def fixed_point_alg(
 ) -> np.ndarray:
     """Run one-unit FastICA fixed-point iterations with orthogonalization."""
     k = 0
-    delta = np.ones(maxiter)
+    delta = 1.0
     basis_bt = basis @ basis.T
     n_samples = x.shape[1]
 
-    while delta[k] > _FIXED_POINT_TOL and k < maxiter - 1:
+    while delta > _FIXED_POINT_TOL and k < maxiter - 1:
         w_last = w.copy()
         wtx = w_last.T @ x
 
@@ -109,7 +109,7 @@ def fixed_point_alg(
         w = w / w_norm
 
         k += 1
-        delta[k] = abs(abs(np.dot(w.flatten(), w_last.flatten())) - 1)
+        delta = abs(abs(np.dot(w.flatten(), w_last.flatten())) - 1)
 
     return w
 
@@ -180,7 +180,7 @@ def minimize_isi_covariance(
         w = np.sum(x[:, spikes], axis=1)
 
     if len(spikes_last) < 2:
-        _, spikes_last = get_spikes(w, x, fsamp)
+        _, spikes_last = get_spikes(w_last, x, fsamp)
 
     return w_last, spikes_last, cov_last
 
@@ -213,27 +213,6 @@ def compute_silhouette(
     sil = (between - within) / denom if denom > 0 else 0.0
 
     return icasig, spikes2, sil
-
-
-def extract_muap_segments(
-    mu_pulses: np.ndarray,
-    length_radius: int,
-    y: np.ndarray,
-) -> np.ndarray:
-    """Extract waveform snippets around pulse indices."""
-    pulses = np.asarray(mu_pulses, dtype=int).reshape(-1)
-    window_size = 2 * length_radius + 1
-    if pulses.size == 0:
-        return np.zeros((0, window_size))
-
-    valid_mask = (pulses >= length_radius) & (pulses < len(y) - length_radius)
-    valid_pulses = pulses[valid_mask]
-    if valid_pulses.size == 0:
-        return np.zeros((0, window_size))
-
-    offsets = np.arange(-length_radius, length_radius + 1, dtype=int)
-    idx = valid_pulses[:, None] + offsets[None, :]
-    return np.asarray(y, dtype=float)[idx]
 
 
 def subtract_mu_waveforms(

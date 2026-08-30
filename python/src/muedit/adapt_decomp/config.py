@@ -17,8 +17,6 @@ class Config:
     wh_learning_rate: float = 7e-3
     sv_learning_rate: float = 3e-3
 
-    sv_epochs: int = 1
-    sv_tol: float = 1e-4
     contrast_func: Literal["logcosh", "cube"] = "logcosh"
 
     cov_alpha: float = 0.1

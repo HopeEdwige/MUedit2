@@ -119,7 +119,7 @@ def _recompute_spikes_in_window(
         merged_spikes = sorted(set(realigned_spikes) | set(spikes_new.tolist()))
         spikes_new = np.array(merged_spikes, dtype=int)
     
-    updated = [s for s in spike_times if s < start + edge or s > end - edge]
+    updated = [s for s in spike_times if s < start + edge or s >= end - edge]
     updated.extend((spikes_new + start).tolist())
     updated = sorted({int(x) for x in updated if x >= 0})
 

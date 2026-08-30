@@ -117,8 +117,8 @@ def _encode_edit_load_f32(loaded: dict[str, Any]) -> bytes | None:
     return _pack_json_f32_payload(b"MELD", metadata, pulse)
 
 
-async def load_decomposition_binary(file: UploadFile) -> Response | dict[str, Any]:
-    loaded = await load_decomposition(file)
+def _wrap_edit_load_binary(loaded: dict[str, Any]) -> Response | dict[str, Any]:
+    """Encode a loaded decomposition as f32 binary, falling back to JSON when not encodable."""
     blob = _encode_edit_load_f32(loaded)
     if blob is None:
         return loaded
@@ -127,6 +127,11 @@ async def load_decomposition_binary(file: UploadFile) -> Response | dict[str, An
         media_type="application/octet-stream",
         headers={"x-muedit-format": "edit-load-f32-v1"},
     )
+
+
+async def load_decomposition_binary(file: UploadFile) -> Response | dict[str, Any]:
+    loaded = await load_decomposition(file)
+    return _wrap_edit_load_binary(loaded)
 
 
 def load_decomposition_from_path(filepath: str) -> dict[str, Any]:
@@ -187,14 +192,7 @@ def load_decomposition_from_path(filepath: str) -> dict[str, Any]:
 
 def load_decomposition_binary_from_path(filepath: str) -> Response | dict[str, Any]:
     loaded = load_decomposition_from_path(filepath)
-    blob = _encode_edit_load_f32(loaded)
-    if blob is None:
-        return loaded
-    return Response(
-        content=blob,
-        media_type="application/octet-stream",
-        headers={"x-muedit-format": "edit-load-f32-v1"},
-    )
+    return _wrap_edit_load_binary(loaded)
 
 
 def _dedup(
@@ -271,6 +269,9 @@ def _export_bids_from_mat_context(
             gain=ctx.get("gains"),
             low_cutoff=ctx.get("emg_hpf"),
             high_cutoff=ctx.get("emg_lpf"),
+            aux_gain=ctx.get("aux_gains"),
+            aux_low_cutoff=ctx.get("aux_hpf"),
+            aux_high_cutoff=ctx.get("aux_lpf"),
             recording_type=ctx.get("recording_type") or "continuous",
             software_filters=ctx.get("software_filters"),
         )
@@ -436,7 +437,7 @@ def save_edits(payload: EditSavePayload) -> dict[str, Any]:
 
 
 def update_filter(payload: EditFilterPayload) -> dict[str, Any]:
-    bids_root = str(resolve_bids_root(payload.project))
+    bids_root = resolve_bids_root(payload.project)
     edit_signal_token = payload.edit_signal_token
     file_label = payload.file_label or ""
     entity_label = payload.entity_label or parse_entity_label(file_label)
@@ -472,7 +473,7 @@ def update_filter(payload: EditFilterPayload) -> dict[str, Any]:
     if bids_root:
         try:
             emg, fsamp, emg_mask = _load_bids_grid(
-                Path(bids_root), str(entity_label), grid_index, view_start, view_end
+                bids_root, str(entity_label), grid_index, view_start, view_end
             )
             emg_is_presliced = True
         except (ValueError, FileNotFoundError):

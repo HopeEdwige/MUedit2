@@ -288,58 +288,24 @@ class AdaptiveDecomp:
 
         separation_vectors_new = self.sep_vectors.copy()
 
-        if self.config.sv_epochs == 1:
-            active = spike_counts > 0
-            if active.any():
-                separation_vectors_new[active] += (
-                    self.config.sv_learning_rate * gradients[:, active].T
-                )
-                norms = np.linalg.norm(separation_vectors_new[active], axis=1, keepdims=True)
-                separation_vectors_new[active] /= np.where(norms > 1e-8, norms, 1.0)
-                for unit_idx in range(1, self.n_motor_units):
-                    if not active[unit_idx]:
-                        continue
-                    separation_vectors_new[unit_idx] -= (
-                        separation_vectors_new[:unit_idx].T
-                        @ (separation_vectors_new[:unit_idx] @ separation_vectors_new[unit_idx])
-                    )
-                    norm = np.linalg.norm(separation_vectors_new[unit_idx])
-                    if norm > 1e-8:
-                        separation_vectors_new[unit_idx] /= norm
-                self.sep_vectors[active] = separation_vectors_new[active]
-        else:
-            for unit_idx in range(self.n_motor_units):
-                if spike_counts[unit_idx] == 0:
+        active = spike_counts > 0
+        if active.any():
+            separation_vectors_new[active] += (
+                self.config.sv_learning_rate * gradients[:, active].T
+            )
+            norms = np.linalg.norm(separation_vectors_new[active], axis=1, keepdims=True)
+            separation_vectors_new[active] /= np.where(norms > 1e-8, norms, 1.0)
+            for unit_idx in range(1, self.n_motor_units):
+                if not active[unit_idx]:
                     continue
-
-                for epoch in range(self.config.sv_epochs):
-                    separation_vectors_new[unit_idx] += (
-                        self.config.sv_learning_rate * gradients[:, unit_idx]
-                    )
-                    norm = np.linalg.norm(separation_vectors_new[unit_idx])
-                    if norm > 1e-8:
-                        separation_vectors_new[unit_idx] /= norm
-
-                    convergence_limit = 1.0 - abs(np.dot(
-                        separation_vectors_new[unit_idx],
-                        self.sep_vectors[unit_idx],
-                    ))
-                    self.sep_vectors[unit_idx] = separation_vectors_new[unit_idx].copy()
-
-                    if (
-                        convergence_limit < self.config.sv_tol
-                        or epoch == self.config.sv_epochs - 1
-                    ):
-                        if unit_idx > 0:
-                            separation_vectors_new[unit_idx] -= (
-                                separation_vectors_new[:unit_idx].T
-                                @ (separation_vectors_new[:unit_idx] @ separation_vectors_new[unit_idx])
-                            )
-                            norm = np.linalg.norm(separation_vectors_new[unit_idx])
-                            if norm > 1e-8:
-                                separation_vectors_new[unit_idx] /= norm
-                        self.sep_vectors[unit_idx] = separation_vectors_new[unit_idx]
-                        break
+                separation_vectors_new[unit_idx] -= (
+                    separation_vectors_new[:unit_idx].T
+                    @ (separation_vectors_new[:unit_idx] @ separation_vectors_new[unit_idx])
+                )
+                norm = np.linalg.norm(separation_vectors_new[unit_idx])
+                if norm > 1e-8:
+                    separation_vectors_new[unit_idx] /= norm
+            self.sep_vectors[active] = separation_vectors_new[active]
 
 
 def run_adaptive_decomposition(
