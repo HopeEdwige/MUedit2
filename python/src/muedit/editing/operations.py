@@ -93,9 +93,6 @@ def _recompute_spikes_in_window(
     pt = signed_square(pt)
 
     peaks = find_refractory_peaks(pt, fsamp, min_isi_sec=POSTPROC_MIN_ISI_SEC)
-    if peaks.size == 0:
-        return None, spike_times
-
     if peaks.size <= 2:
         return None, spike_times
     spikes_new, centroids, labels = split_by_amplitude(pt, peaks, missing="warn")
@@ -111,8 +108,8 @@ def _recompute_spikes_in_window(
         realigned_spikes = []
         for orig_spike in spikes1:
             local_pos = int(orig_spike - start)
-            search_start = max(0, local_pos - 10)
-            search_end = min(len(pt), local_pos + 11)
+            search_start = max(edge, local_pos - 10)
+            search_end = min(len(pt) - edge, local_pos + 11)
             local_peaks_in_range = peaks[(peaks >= search_start) & (peaks < search_end)]
             if local_peaks_in_range.size > 0:
                 nearest_peak = local_peaks_in_range[np.argmin(np.abs(local_peaks_in_range - local_pos))]
@@ -261,17 +258,13 @@ def delete_high_discharge_rate_spikes_in_roi(
     y_min: float,
 ) -> SpikeTimes:
     """Delete one spike from high-rate pairs within an ROI."""
-    ordered = sorted(spike_times)
+    ordered = sorted({int(x) for x in spike_times})
     if len(ordered) < 2:
-        return sorted({int(x) for x in ordered})
+        return ordered
     dist = np.array(ordered, dtype=int)
     isi = np.diff(dist)
-    valid = isi > 0
-    if not np.any(valid):
-        return sorted({int(x) for x in ordered})
-    isi = isi[valid]
     dr = fsamp / isi
-    mids = dist[1:][valid] - (isi // 2)
+    mids = dist[1:] - (isi // 2)
 
     deletions = set()
     for i in range(len(dr)):
@@ -280,16 +273,14 @@ def delete_high_discharge_rate_spikes_in_roi(
             continue
         if dr[i] <= y_min:
             continue
-        left_idx = i
-        right_idx = i + 1
-        left = ordered[left_idx]
-        right = ordered[right_idx]
+        left = ordered[i]
+        right = ordered[i + 1]
         left_val = pulse[left] if 0 <= left < len(pulse) else 0
         right_val = pulse[right] if 0 <= right < len(pulse) else 0
-        deletions.add(left_idx if left_val < right_val else right_idx)
+        deletions.add(i if left_val < right_val else i + 1)
 
     updated = [t for j, t in enumerate(ordered) if j not in deletions]
-    return sorted({int(x) for x in updated})
+    return updated
 
 
 def remove_discharge_rate_outliers(
@@ -306,10 +297,7 @@ def remove_discharge_rate_outliers(
     dr = []
     for i in range(len(ordered) - 1):
         isi = ordered[i + 1] - ordered[i]
-        if isi > 0:
-            dr.append(fsamp / isi)
-    if not dr:
-        return ordered
+        dr.append(fsamp / isi)
 
     mean = float(np.mean(dr))
     std = float(np.std(dr))
@@ -318,8 +306,6 @@ def remove_discharge_rate_outliers(
     deletions = set()
     for i in range(len(ordered) - 1):
         isi = ordered[i + 1] - ordered[i]
-        if isi <= 0:
-            continue
         rate = fsamp / isi
         if rate <= threshold:
             continue
