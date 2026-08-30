@@ -5,6 +5,7 @@ import {
   setChannelTraces,
   setCoordinates,
   setCurrentStage,
+  setFsamp,
   setGridNames,
   setGridSeries,
   setMetadata,
@@ -20,17 +21,7 @@ import {
   beginRawPreviewTransition,
   rollbackRawPreviewTransition,
 } from "../state/transitions.js";
-import {
-  isQcRawF32Payload,
-  decodeQcJsonPayload,
-  decodeQcRawF32,
-} from "../api/binary-payloads.js";
-import { routes } from "../api/routes.js";
 import { roiStart, roiEnd } from "../state/selectors.js";
-import {
-  resetBidsEntityDefaults,
-  applyParticipantFields,
-} from "../view/bids-renderer.js";
 
 function channelsToEnv(channels) {
   return (Array.isArray(channels) ? channels : [])
@@ -57,8 +48,7 @@ export async function requestQcGridWindow(
   end,
   targetPoints = 96,
 ) {
-  const { state, apiJson, apiFetch, API_BASE, renderChannelQC, setStatus } =
-    deps;
+  const { state, api, renderChannelQC, setStatus } = deps;
   const s = Number.isFinite(start) ? start : 0;
   const e = Number.isFinite(end) ? end : state.seriesLength;
 
@@ -77,45 +67,11 @@ export async function requestQcGridWindow(
       target_points: targetPoints,
     };
 
-    let env = [];
-    // Raw mode prefers binary transport for lower payload size; fall back to JSON decoding
-    // when the backend responds in JSON (or when callers choose JSON mode).
-    if (
+    const preferBinary =
       (state.qcRepresentation || "raw") === "raw" &&
-      typeof apiFetch === "function"
-    ) {
-      const res = await apiFetch(
-        `${API_BASE}${routes.qcWindow}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/octet-stream",
-          },
-          body: JSON.stringify(requestPayload),
-        },
-        120000,
-      );
-      const payload = await res.arrayBuffer();
-      if (isQcRawF32Payload(payload, res.headers.get("x-muedit-format"))) {
-        const decoded = decodeQcRawF32(payload);
-        env = channelsToEnv(decoded.channels);
-      } else {
-        const data = decodeQcJsonPayload(payload);
-        env = channelsToEnv(data.channels);
-      }
-    } else {
-      const data = await apiJson(
-        `${API_BASE}${routes.qcWindow}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(requestPayload),
-        },
-        120000,
-      );
-      env = channelsToEnv(data.channels);
-    }
+      typeof api?.fetchQcWindow === "function";
+    const data = await api.fetchQcWindow(requestPayload, { preferBinary });
+    const env = channelsToEnv(data.channels);
     setChannelTraceForGrid(state, gridIdx, env);
     if (gridIdx === state.currentGrid) {
       renderChannelQC();
@@ -134,8 +90,7 @@ export async function requestPreview(deps, options = {}) {
   const { silentFailure = false, filepath = null } = options;
   const {
     state,
-    apiJson,
-    API_BASE,
+    api,
     setUploadLoading,
     updateProgress,
     populateAuxSelector,
@@ -151,7 +106,9 @@ export async function requestPreview(deps, options = {}) {
     nextFrame,
     refreshVisuals,
     renderChannelQC,
-    els,
+    applyPreviewMetadata,
+    getNwindows,
+    hideLanding,
   } = deps;
 
   if (!state.file && !filepath) return;
@@ -161,23 +118,11 @@ export async function requestPreview(deps, options = {}) {
   try {
     let data;
     if (filepath) {
-      data = await apiJson(
-        `${API_BASE}${routes.previewByPath}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: filepath }),
-        },
-        120000,
-      );
+      data = await api.fetchPreviewByPath(filepath);
     } else {
       const formData = new FormData();
       formData.append("file", state.file);
-      data = await apiJson(
-        `${API_BASE}${routes.preview}`,
-        { method: "POST", body: formData },
-        120000,
-      );
+      data = await api.fetchPreview(formData);
     }
     setUploadToken(state, data.upload_token || null);
     setGridSeries(state, data.grid_mean_abs || []);
@@ -190,16 +135,13 @@ export async function requestPreview(deps, options = {}) {
     setMetadata(state, data.metadata || {});
     setMuscle(state, data.muscle || []);
     setAuxData(state, data.auxiliary || [], data.auxiliary_names || []);
-    if (els.fsamp) {
-      const fs = Number(data.fsamp);
-      els.fsamp.value =
-        Number.isFinite(fs) && fs > 0 ? String(Math.round(fs)) : "";
-    }
+    setFsamp(state, data.fsamp);
+    if (applyPreviewMetadata) applyPreviewMetadata(data);
     setPreviewSeries(state, data.mean_abs || []);
     populateAuxSelector();
     ensureDiscardMasks();
     populateGridTabs();
-    const nwin = Number(els.nwindows?.value) || 1;
+    const nwin = getNwindows ? getNwindows() : 1;
     const defaultEnd = state.seriesLength || 0;
     const rois = [];
     for (let i = 0; i < nwin; i++) {
@@ -220,20 +162,13 @@ export async function requestPreview(deps, options = {}) {
     renderBidsAutoInfo();
     renderBidsMuscleFields();
 
-    // Populate participant and hardware fields from BIDS sidecars when available.
-    const participant = data?.participant_meta || {};
-    applyParticipantFields(els, participant);
-    if (els.bidsManufacturer && data?.manufacturer)
-      els.bidsManufacturer.value = data.manufacturer;
-    if (els.bidsDeviceModel && data?.manufacturers_model_name)
-      els.bidsDeviceModel.value = data.manufacturers_model_name;
     updateProgress(0, "Preview ready - drag to select ROI");
     setStatus("Preview ready", "success");
     showWorkspace({ keepLandingVisible: true });
     await nextFrame();
     refreshVisuals();
     await renderChannelQC(true);
-    if (els.landing) els.landing.classList.add("hidden");
+    if (hideLanding) hideLanding();
     return true;
   } catch (err) {
     console.error(err);
@@ -250,12 +185,17 @@ export async function requestPreview(deps, options = {}) {
 
 export async function handleRawFile(deps, file, options = {}) {
   const { silentPreviewFailure = false } = options;
-  const { state, els, requestPreview, setStatus, updateStartAvailability } =
-    deps;
+  const {
+    state,
+    resetBidsEntityDefaults,
+    requestPreview,
+    setStatus,
+    updateStartAvailability,
+  } = deps;
 
   if (!file) return;
   beginRawPreviewTransition(state, file);
-  resetBidsEntityDefaults(els, file.name);
+  resetBidsEntityDefaults(file.name);
   setStatus("File ready");
   updateStartAvailability();
   const ok = await requestPreview({ silentFailure: silentPreviewFailure });

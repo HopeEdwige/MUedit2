@@ -15,11 +15,13 @@ import {
   deleteDrInSelection as deleteDrInSelectionFeature,
   resetCurrentMuEdits as resetCurrentMuEditsFeature,
   duplicateMu as duplicateMuFeature,
+  buildEditDropdownModel,
 } from "../../editing/operations.js";
 import {
   renderEditExplorer as renderEditExplorerFeature,
   renderInstantaneousDr as renderInstantaneousDrFeature,
   renderEditTimeline as renderEditTimelineFeature,
+  renderEditDropdownsView,
   bindEditCanvas as bindEditCanvasFeature,
   bindEditDrCanvas as bindEditDrCanvasFeature,
   bindEditTimeline as bindEditTimelineFeature,
@@ -48,9 +50,7 @@ export function createEditStageService(deps) {
   const {
     state,
     els,
-    API_BASE,
-    apiFetch,
-    apiJson,
+    api,
     COLORS,
     drawSeries,
     getCanvasPlotMetrics,
@@ -109,7 +109,9 @@ export function createEditStageService(deps) {
   }
 
   function resetEditState() {
-    resetEditStateFeature({ state, els, refreshEditModeButtons });
+    resetEditStateFeature({ state, refreshEditModeButtons });
+    if (els.editSaveBtn) els.editSaveBtn.disabled = true;
+    if (els.bidsProject) els.bidsProject.value = "";
   }
 
   function getEditMuIndices(gridIdx) {
@@ -117,54 +119,14 @@ export function createEditStageService(deps) {
   }
 
   function renderEditDropdowns() {
-    const gridSel = els.editMuGridSelect;
-    const muSel = els.editMuSelect;
-    if (!gridSel || !muSel) return;
-
-    gridSel.innerHTML = "";
-    (state.edit.gridNames || []).forEach((name, idx) => {
-      const opt = document.createElement("option");
-      opt.value = String(idx);
-      opt.textContent = `Grid ${idx + 1}${name ? ` • ${name}` : ""}`;
-      gridSel.appendChild(opt);
-    });
-
-    let targetGrid = state.edit.currentMuGrid || 0;
-    let mus = getEditMuIndices(targetGrid);
-    if (!mus.length && state.edit.gridNames?.length) {
-      for (let g = 0; g < state.edit.gridNames.length; g++) {
-        const list = getEditMuIndices(g);
-        if (list.length) {
-          targetGrid = g;
-          mus = list;
-          setEditCurrentMuGrid(state, g, { resetView: false });
-          break;
-        }
-      }
+    const model = buildEditDropdownModel(state, getEditMuIndices);
+    if (model.needsGridSwitch) {
+      setEditCurrentMuGrid(state, model.targetGrid, { resetView: false });
     }
-    gridSel.value = String(targetGrid);
-
-    muSel.innerHTML = "";
-    if (!mus.length) {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "No motor units";
-      muSel.appendChild(opt);
-      muSel.disabled = true;
-      return;
+    if (model.needsMuSwitch) {
+      setEditCurrentMu(state, model.currentMu, { resetView: false });
     }
-    muSel.disabled = false;
-    mus.forEach((muIdx) => {
-      const opt = document.createElement("option");
-      opt.value = String(muIdx);
-      opt.textContent = `MU ${muIdx + 1}`;
-      muSel.appendChild(opt);
-    });
-    const currentMu = state.edit.currentMu;
-    if (!mus.includes(currentMu)) {
-      setEditCurrentMu(state, mus[0], { resetView: false });
-    }
-    muSel.value = String(state.edit.currentMu);
+    renderEditDropdownsView(els, model);
   }
 
   function renderInstantaneousDr() {
@@ -206,8 +168,7 @@ export function createEditStageService(deps) {
     return requestRoiEditFeature(
       {
         state,
-        API_BASE,
-        apiJson,
+        api,
         setEditStatus,
         ensureEditFlagged,
         setEditMode,
@@ -225,8 +186,7 @@ export function createEditStageService(deps) {
       {
         state,
         els,
-        API_BASE,
-        apiJson,
+        api,
         setEditStatus,
         getRawPulse,
         backupEditMu,
@@ -249,11 +209,13 @@ export function createEditStageService(deps) {
     return addSpikesInSelectionFeature(
       {
         state,
-        els,
         getRawPulse,
         backupEditMu,
         getPulseViewMeta,
-        getCanvasPlotMetrics,
+        getPulsePlotHeight: () =>
+          els.editPulseCanvas
+            ? getCanvasPlotMetrics(els.editPulseCanvas, true).plotHeight || 1
+            : 1,
         requestRoiEdit,
       },
       sel,
@@ -264,11 +226,13 @@ export function createEditStageService(deps) {
     return addArtifactInSelectionFeature(
       {
         state,
-        els,
         getRawPulse,
         backupEditMu,
         getPulseViewMeta,
-        getCanvasPlotMetrics,
+        getPulsePlotHeight: () =>
+          els.editPulseCanvas
+            ? getCanvasPlotMetrics(els.editPulseCanvas, true).plotHeight || 1
+            : 1,
         requestRoiEdit,
       },
       sel,
@@ -279,11 +243,13 @@ export function createEditStageService(deps) {
     return deleteSpikesInSelectionFeature(
       {
         state,
-        els,
         getRawPulse,
         backupEditMu,
         getPulseViewMeta,
-        getCanvasPlotMetrics,
+        getPulsePlotHeight: () =>
+          els.editPulseCanvas
+            ? getCanvasPlotMetrics(els.editPulseCanvas, true).plotHeight || 1
+            : 1,
         requestRoiEdit,
       },
       sel,
@@ -294,9 +260,11 @@ export function createEditStageService(deps) {
     return deleteDrInSelectionFeature(
       {
         state,
-        els,
         backupEditMu,
-        getCanvasPlotMetrics,
+        getDrPlotHeight: () =>
+          els.editDrCanvas
+            ? getCanvasPlotMetrics(els.editDrCanvas, true).plotHeight || 1
+            : 1,
         getRawPulse,
         requestRoiEdit,
       },
@@ -307,8 +275,7 @@ export function createEditStageService(deps) {
   async function removeOutliers() {
     return removeOutliersFeature({
       state,
-      API_BASE,
-      apiJson,
+      api,
       setEditStatus,
       getRawPulse,
       backupEditMu,
@@ -322,8 +289,7 @@ export function createEditStageService(deps) {
   async function flagMuForDeletion() {
     return flagMuForDeletionFeature({
       state,
-      API_BASE,
-      apiJson,
+      api,
       setEditStatus,
       getRawPulse,
       backupEditMu,
@@ -348,8 +314,7 @@ export function createEditStageService(deps) {
   async function removeDuplicateMus() {
     return removeDuplicateMusFeature({
       state,
-      API_BASE,
-      apiJson,
+      api,
       setEditStatus,
       ensureEditFlagged,
       setEditBookmark,
@@ -422,9 +387,7 @@ export function createEditStageService(deps) {
     return loadDecompositionForEditFeature(
       {
         state,
-        apiFetch,
-        apiJson,
-        API_BASE,
+        api,
         applySessionInfoFromDecomposition,
         ensureEditFlagged,
         recomputeEditDirty,

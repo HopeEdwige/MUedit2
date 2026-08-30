@@ -2,6 +2,13 @@ import { COLORS } from "../config.js";
 import { drawRoiRects } from "./plots.js";
 import { gridDimensionsFor } from "../io/grid.js";
 import { roiStart, roiEnd } from "../state/selectors.js";
+import {
+  setChannelTraces,
+  setCurrentGrid,
+  setDiscardMaskChannel,
+  setRoiDraft,
+  setRoiForIndex,
+} from "../state/actions.js";
 
 export function refreshVisuals(deps) {
   const {
@@ -66,12 +73,12 @@ export function enableRoiSelection(deps, canvasId) {
         idx = i;
       }
     });
-    state.rois[idx] = {
+    setRoiForIndex(state, idx, {
       start: startSample,
       end: Math.max(startSample + 1, endSample),
-    };
-    state.roiDraft = null;
-    state.channelTraces = [];
+    });
+    setRoiDraft(state, null);
+    setChannelTraces(state, []);
     refreshVisualsFn();
     requestQcGridWindow(
       state.currentGrid,
@@ -90,7 +97,7 @@ export function enableRoiSelection(deps, canvasId) {
     const rect = canvas.getBoundingClientRect();
     startX = e.clientX - rect.left;
     endX = startX;
-    state.roiDraft = null;
+    setRoiDraft(state, null);
   });
 
   canvas.addEventListener("mousemove", (e) => {
@@ -98,10 +105,10 @@ export function enableRoiSelection(deps, canvasId) {
     const rect = canvas.getBoundingClientRect();
     endX = e.clientX - rect.left;
     const { startSample, endSample } = toSamples(startX, endX);
-    state.roiDraft = {
+    setRoiDraft(state, {
       start: startSample,
       end: Math.max(startSample + 1, endSample),
-    };
+    });
     refreshVisualsFn();
   });
 
@@ -112,7 +119,7 @@ export function enableRoiSelection(deps, canvasId) {
     }
     dragging = false;
     if (Math.abs(endX - startX) < 4) {
-      state.roiDraft = null;
+      setRoiDraft(state, null);
       refreshVisualsFn();
       return;
     }
@@ -138,7 +145,7 @@ export function renderChannelQC(deps, waitForMiniPlots = false) {
   const allMeans = state.channelMeans || [];
   if (!allMeans[gridIdx] && allMeans.length) {
     gridIdx = 0;
-    state.currentGrid = 0;
+    setCurrentGrid(state, 0);
   }
   const means = allMeans[gridIdx];
   const meanList = Array.isArray(means) ? means : Array.from(means || []);
@@ -186,8 +193,7 @@ export function renderChannelQC(deps, waitForMiniPlots = false) {
     const meanText = Number.isFinite(meanVal) ? meanVal.toFixed(3) : "n/a";
     cell.title = `Channel ${chIdx + 1} • mean |EMG| ${meanText}`;
     cell.addEventListener("click", () => {
-      mask[chIdx] = off ? 0 : 1;
-      state.discardMasks[gridIdx] = mask;
+      setDiscardMaskChannel(state, gridIdx, chIdx, off ? 0 : 1);
       renderChannelQC(deps, false);
     });
     miniDrawJobs.push(() =>

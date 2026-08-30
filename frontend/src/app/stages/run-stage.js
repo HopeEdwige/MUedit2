@@ -22,8 +22,7 @@ export function createRunStageService(deps) {
   const {
     state,
     els,
-    API_BASE,
-    apiFetch,
+    api,
     drawSeries,
     drawGridOverlay,
     getSuggestedNpzName,
@@ -36,6 +35,9 @@ export function createRunStageService(deps) {
     switchStage,
     setStatus,
     updateProgress,
+    setProgressText,
+    setNwindows,
+    emgCanvasId,
     ensureDiscardMasks,
     renderChannelQC,
     getCurrentGrid,
@@ -75,10 +77,9 @@ export function createRunStageService(deps) {
 
   function renderMuExplorer() {
     renderMuDropdowns();
-    const fs = Number(els.fsamp?.value);
     const model = buildRunMuExplorerModelFeature({
       state,
-      fsamp: Number.isFinite(fs) && fs > 0 ? fs : null,
+      fsamp: state.fsamp,
     });
     if (model.nextView) {
       setRunView(state, model.nextView);
@@ -90,7 +91,6 @@ export function createRunStageService(deps) {
   function autoSaveRunDecomposition() {
     return autoSaveRunDecompositionFeature({
       state,
-      els,
       getSuggestedNpzName,
       persistNpzBySaveTarget,
       getBidsMuscleNames,
@@ -103,11 +103,10 @@ export function createRunStageService(deps) {
     return handleStreamMessageFeature(
       {
         state,
-        els,
-        apiFetch,
-        API_BASE,
+        api,
         setStatus,
         updateProgress,
+        setProgressText,
         ensureDiscardMasks,
         renderChannelQC,
         getCurrentGrid,
@@ -121,6 +120,8 @@ export function createRunStageService(deps) {
         renderAuxiliaryChannels,
         enableRoiSelection,
         autoSaveRunDecomposition,
+        setNwindows,
+        emgCanvasId,
       },
       msg,
     );
@@ -129,9 +130,7 @@ export function createRunStageService(deps) {
   function runDecomposition() {
     return runDecompositionFeature({
       state,
-      els,
-      API_BASE,
-      apiFetch,
+      api,
       getBidsProject,
       collectBidsEntities,
       buildParams,

@@ -6,9 +6,7 @@
  * helpers imported from `state/actions.js`.
  */
 import { handleError } from "./error-service.js";
-import { decodeEditLoadPayload } from "../../api/binary-payloads.js";
 import { normalizeEditLoadPayload } from "../../api/payloads.js";
-import { routes } from "../../api/routes.js";
 import { inferGridCount, normalizeGridNames } from "../../io/grid.js";
 import { muUidFor } from "../../state/selectors.js";
 import {
@@ -76,8 +74,7 @@ function setEditBookmarkAndHide(state, muIdx, position) {
 export async function requestRoiEdit(deps, action, payload) {
   const {
     state,
-    API_BASE,
-    apiJson,
+    api,
     setEditStatus,
     ensureEditFlagged,
     setEditMode,
@@ -92,25 +89,21 @@ export async function requestRoiEdit(deps, action, payload) {
   const isArtifact = action === "add-artifact";
   try {
     setEditStatus("Applying ROI...", "muted");
-    const data = await apiJson(`${API_BASE}${routes.editAction(action)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        distimes: state.edit.distimes,
-        mu_index: payload.muIdx,
-        pulse_train: payload.pulse,
-        fsamp: payload.fs,
-        x_start: payload.xStart,
-        x_end: payload.xEnd,
-        y_min: payload.yMin,
-        y_max: payload.yMax,
-        artifact_times:
-          payload.artifact_times !== undefined
-            ? payload.artifact_times
-            : isArtifact
-              ? state.edit.artifactTimes?.[payload.muIdx] || []
-              : undefined,
-      }),
+    const data = await api.editAction(action, {
+      distimes: state.edit.distimes,
+      mu_index: payload.muIdx,
+      pulse_train: payload.pulse,
+      fsamp: payload.fs,
+      x_start: payload.xStart,
+      x_end: payload.xEnd,
+      y_min: payload.yMin,
+      y_max: payload.yMax,
+      artifact_times:
+        payload.artifact_times !== undefined
+          ? payload.artifact_times
+          : isArtifact
+            ? state.edit.artifactTimes?.[payload.muIdx] || []
+            : undefined,
     });
     if (data.distimes !== undefined) {
       setEditDistimesForMu(state, payload.muIdx, data.distimes || []);
@@ -203,8 +196,7 @@ export async function requestFilterUpdate(deps, mode) {
   const {
     state,
     els,
-    API_BASE,
-    apiJson,
+    api,
     setEditStatus,
     getRawPulse,
     backupEditMu,
@@ -230,30 +222,22 @@ export async function requestFilterUpdate(deps, mode) {
   try {
     backupEditMu();
     setEditStatus("Updating filter from BIDS EMG...", "muted");
-    const data = await apiJson(
-      `${API_BASE}${routes.editMode(mode)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          project: state.edit.project || "",
-          edit_signal_token: state.edit.editSignalToken || "",
-          file_label: state.edit.filename,
-          grid_index: gridIndex,
-          mu_index: muIdx,
-          distimes: state.edit.distimes,
-          mu_grid_index: state.edit.muGridIndex || [],
-          pulse_train: pulse,
-          view_start: start,
-          view_end: end,
-          use_peeloff: els.editPeelOffToggle?.dataset.state === "on",
-          lock_spikes: els.editLockSpikesToggle?.dataset.state === "on",
-          flagged: state.edit.flagged || [],
-          artifact_times: state.edit.artifactTimes?.[muIdx] || [],
-        }),
-      },
-      120000,
-    );
+    const data = await api.editMode(mode, {
+      project: state.edit.project || "",
+      edit_signal_token: state.edit.editSignalToken || "",
+      file_label: state.edit.filename,
+      grid_index: gridIndex,
+      mu_index: muIdx,
+      distimes: state.edit.distimes,
+      mu_grid_index: state.edit.muGridIndex || [],
+      pulse_train: pulse,
+      view_start: start,
+      view_end: end,
+      use_peeloff: els.editPeelOffToggle?.dataset.state === "on",
+      lock_spikes: els.editLockSpikesToggle?.dataset.state === "on",
+      flagged: state.edit.flagged || [],
+      artifact_times: state.edit.artifactTimes?.[muIdx] || [],
+    });
     setEditDistimesForMu(state, muIdx, data.distimes || []);
     if (data.pulse_train && Array.isArray(data.pulse_train)) {
       setEditPulseTrainForMu(state, muIdx, data.pulse_train);
@@ -292,8 +276,7 @@ export async function requestFilterUpdate(deps, mode) {
 export async function removeOutliers(deps) {
   const {
     state,
-    API_BASE,
-    apiJson,
+    api,
     setEditStatus,
     getRawPulse,
     backupEditMu,
@@ -316,15 +299,11 @@ export async function removeOutliers(deps) {
   }
   try {
     setEditStatus("Removing outliers...", "muted");
-    const data = await apiJson(`${API_BASE}${routes.editRemoveOutliers}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        distimes: state.edit.distimes,
-        mu_index: muIdx,
-        pulse_train: pulse,
-        fsamp: state.edit.fsamp || 0,
-      }),
+    const data = await api.editRemoveOutliers({
+      distimes: state.edit.distimes,
+      mu_index: muIdx,
+      pulse_train: pulse,
+      fsamp: state.edit.fsamp || 0,
     });
     setEditDistimesForMu(state, muIdx, data.distimes || []);
     ensureEditFlagged();
@@ -359,8 +338,7 @@ export async function removeOutliers(deps) {
 export async function removeDuplicateMus(deps) {
   const {
     state,
-    API_BASE,
-    apiJson,
+    api,
     setEditStatus,
     ensureEditFlagged,
     setShowBookmark,
@@ -375,16 +353,12 @@ export async function removeDuplicateMus(deps) {
   }
   try {
     setEditStatus("Removing duplicates...", "muted");
-    const data = await apiJson(`${API_BASE}${routes.editRemoveDuplicates}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        distimes: state.edit.distimes,
-        fsamp: state.edit.fsamp,
-        total_samples: state.edit.totalSamples || 0,
-        mu_grid_index: state.edit.muGridIndex || [],
-        parameters: state.edit.parameters || {},
-      }),
+    const data = await api.editRemoveDuplicates({
+      distimes: state.edit.distimes,
+      fsamp: state.edit.fsamp,
+      total_samples: state.edit.totalSamples || 0,
+      mu_grid_index: state.edit.muGridIndex || [],
+      parameters: state.edit.parameters || {},
     });
 
     const keptIdx = data.kept_indices || [];
@@ -461,8 +435,7 @@ export async function removeDuplicateMus(deps) {
 export async function flagMuForDeletion(deps) {
   const {
     state,
-    API_BASE,
-    apiJson,
+    api,
     setEditStatus,
     getRawPulse,
     backupEditMu,
@@ -481,13 +454,9 @@ export async function flagMuForDeletion(deps) {
   backupEditMu();
   try {
     setEditStatus("Flagging MU for deletion...", "muted");
-    const data = await apiJson(`${API_BASE}${routes.editFlagMu}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        distimes: state.edit.distimes,
-        mu_index: muIdx,
-      }),
+    const data = await api.editFlagMu({
+      distimes: state.edit.distimes,
+      mu_index: muIdx,
     });
     ensureEditFlagged();
     setEditFlagForMu(state, muIdx, data.flagged !== false);
@@ -586,9 +555,7 @@ export async function saveEditedFile(deps) {
 export async function loadDecompositionForEdit(deps, file, filepath = null) {
   const {
     state,
-    apiFetch,
-    apiJson,
-    API_BASE,
+    api,
     applySessionInfoFromDecomposition,
     ensureEditFlagged,
     recomputeEditDirty,
@@ -609,47 +576,7 @@ export async function loadDecompositionForEdit(deps, file, filepath = null) {
   setMuscle(state, []);
   try {
     let data;
-    if (filepath) {
-      const res = await apiFetch(
-        `${API_BASE}${routes.editLoadByPath}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ path: filepath }),
-        },
-        120000,
-      );
-      data = decodeEditLoadPayload(
-        await res.arrayBuffer(),
-        res.headers.get("x-muedit-format"),
-      );
-    } else if (typeof apiFetch === "function") {
-      const formData = new FormData();
-      formData.append("file", file);
-      const res = await apiFetch(
-        `${API_BASE}${routes.editLoad}`,
-        {
-          method: "POST",
-          headers: {},
-          body: formData,
-        },
-        120000,
-      );
-      data = decodeEditLoadPayload(
-        await res.arrayBuffer(),
-        res.headers.get("x-muedit-format"),
-      );
-    } else {
-      const formData = new FormData();
-      formData.append("file", file);
-      data = await apiJson(
-        `${API_BASE}${routes.editLoad}`,
-        { method: "POST", body: formData },
-        120000,
-      );
-    }
+    data = await api.editLoad({ file, filepath });
     data = normalizeEditLoadPayload(data);
     const resolvedGridNames = normalizeGridNames(data.grid_names, {
       minimumCount: inferGridCount({

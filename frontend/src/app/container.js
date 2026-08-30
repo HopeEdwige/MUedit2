@@ -4,9 +4,17 @@ import {
   DECOMPOSITION_EXTENSIONS,
   RAW_SIGNAL_EXTENSIONS,
 } from "../config.js";
-import { routes } from "../api/routes.js";
+import { createApiClient } from "../api/client.js";
+import { buildDecomposeParams } from "../decomp/params.js";
 import { els } from "./dom.js";
 import { apiFetch, apiJson, waitForBackend } from "./http.js";
+import {
+  applySessionInfoToDom as applySessionInfoToDomController,
+  renderBidsAutoInfo as renderBidsAutoInfoController,
+  renderBidsMuscleFields as renderBidsMuscleFieldsController,
+  resetBidsEntityDefaults,
+  applyParticipantFields,
+} from "../view/bids-renderer.js";
 import {
   buildBidsAutoInfoModel as buildBidsAutoInfoModelFeature,
   buildBidsMuscleRowsModel as buildBidsMuscleRowsModelFeature,
@@ -16,11 +24,6 @@ import {
   listifyMuscles,
   parseBidsEntitiesFromLabel,
 } from "../io/bids.js";
-import {
-  applySessionInfoToDom as applySessionInfoToDomController,
-  renderBidsAutoInfo as renderBidsAutoInfoController,
-  renderBidsMuscleFields as renderBidsMuscleFieldsController,
-} from "../view/bids-renderer.js";
 import {
   adjustView as adjustViewFeature,
   getViewForStage as getViewForStageFeature,
@@ -53,6 +56,8 @@ import {
   setCurrentGrid,
   setEditProject,
   setEditMode,
+  setEditSoftwareVersions,
+  setFsamp,
   setMuscle as setMuscleAction,
   setShowBookmark,
 } from "../state/actions.js";
@@ -64,6 +69,8 @@ import {
 import { createUiService } from "./services/ui.js";
 import { createFileSessionService } from "./services/file-session.js";
 import { createQcStageService } from "./stages/qc-stage.js";
+
+const api = createApiClient({ apiFetch, apiJson, API_BASE });
 
 function nextFrame() {
   return new Promise((resolve) => {
@@ -86,34 +93,19 @@ function getCurrentGrid() {
 }
 
 function buildParams(isToggleOn) {
-  const niter = Number(els.niter?.value) || 150;
-  const nwindows = Number(els.nwindows?.value) || 1;
-  const peelOn = isToggleOn(els.peelOffToggle);
-  const adaptiveOn = isToggleOn(els.useAdaptiveToggle);
-  const fullTraceOn = isToggleOn(els.fullTraceToggle);
-  const covOn = isToggleOn(els.covToggle);
-  const silOn = isToggleOn(els.silToggle);
-  const peelWindow = Number(els.peelOffWindow?.value) || 25;
-  const covVal = Number(els.covValue?.value) || 0.5;
-  const silVal = Number(els.silValue?.value) || 0.9;
-  const duplicatesthresh = Number(els.duplicatesthresh?.value) || 0.3;
-
-  return {
-    niter,
-    nwindows,
-    nbextchan: 1000,
-    duplicatesthresh,
-    sil_thr: silVal,
-    sil_filter: silOn ? 1 : 0,
-    cov_thr: covVal,
-    covfilter: covOn ? 1 : 0,
-    contrast_func: "skew",
-    initialization: 0,
-    peel_off_enabled: peelOn ? 1 : 0,
-    peel_off_win: peelWindow / 1000,
-    use_adaptive: adaptiveOn ? 1 : 0,
-    full_trace: fullTraceOn ? 1 : 0,
-  };
+  return buildDecomposeParams({
+    niter: Number(els.niter?.value) || 150,
+    nwindows: Number(els.nwindows?.value) || 1,
+    peelOn: isToggleOn(els.peelOffToggle),
+    adaptiveOn: isToggleOn(els.useAdaptiveToggle),
+    fullTraceOn: isToggleOn(els.fullTraceToggle),
+    covOn: isToggleOn(els.covToggle),
+    silOn: isToggleOn(els.silToggle),
+    peelWindow: Number(els.peelOffWindow?.value) || 25,
+    covVal: Number(els.covValue?.value) || 0.5,
+    silVal: Number(els.silValue?.value) || 0.9,
+    duplicatesthresh: Number(els.duplicatesthresh?.value) || 0.3,
+  });
 }
 
 function applySessionInfoFromDecomposition(file, data = {}) {
@@ -123,7 +115,8 @@ function applySessionInfoFromDecomposition(file, data = {}) {
   });
   applySessionInfoToDomController(els, payload);
   setMuscleAction(state, payload.muscles);
-  state.edit.softwareVersions = payload.bids?.softwareVersions ?? null;
+  setEditSoftwareVersions(state, payload.bids?.softwareVersions ?? null);
+  setFsamp(state, payload.fsampText);
 }
 
 function renderBidsAutoInfo() {
@@ -166,20 +159,12 @@ async function persistNpzBySaveTarget(payload, fallbackName, fileSession, ui) {
       acq: acquisition,
     }) || payload.entity_label;
 
-  const data = await apiJson(
-    `${API_BASE}${routes.editSave}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...payload,
-        file_label: payload.file_label || fallbackName || "decomposition.npz",
-        entity_label: entityLabel,
-        ...fileSession.getBidsSaveFields(),
-      }),
-    },
-    120000,
-  );
+  const data = await api.editSave({
+    ...payload,
+    file_label: payload.file_label || fallbackName || "decomposition.npz",
+    entity_label: entityLabel,
+    ...fileSession.getBidsSaveFields(),
+  });
   ui.setStatus("Saved", "success");
   return { mode: "saved", path: data.path || "" };
 }
@@ -316,9 +301,7 @@ function handleKeyboardNavigation(e) {
 editStage = createEditStageService({
   state,
   els,
-  API_BASE,
-  apiFetch,
-  apiJson,
+  api,
   COLORS,
   drawSeries,
   getCanvasPlotMetrics,
@@ -340,8 +323,7 @@ editStage = createEditStageService({
 runStage = createRunStageService({
   state,
   els,
-  API_BASE,
-  apiFetch,
+  api,
   COLORS,
   drawSeries,
   drawGridOverlay,
@@ -356,6 +338,13 @@ runStage = createRunStageService({
   switchStage: ui.switchStage,
   setStatus: ui.setStatus,
   updateProgress: ui.updateProgress,
+  setProgressText: (text) => {
+    if (els.progressText) els.progressText.textContent = text;
+  },
+  setNwindows: (n) => {
+    if (els.nwindows) els.nwindows.value = n;
+  },
+  emgCanvasId: els.emgCanvas?.id || "emgCanvas",
   ensureDiscardMasks,
   renderChannelQC,
   getCurrentGrid,
@@ -373,9 +362,7 @@ runStage = createRunStageService({
 qcStage = createQcStageService({
   state,
   els,
-  API_BASE,
-  apiFetch,
-  apiJson,
+  api,
   drawMiniSeries,
   drawGridOverlay,
   setStatus: ui.setStatus,
@@ -399,11 +386,28 @@ qcStage = createQcStageService({
   nextFrame,
   updateStartAvailability,
   renderMuExplorer: () => runStage.renderMuExplorer(),
+  resetBidsEntityDefaults: (fileName) => resetBidsEntityDefaults(els, fileName),
+  applyPreviewMetadata: (data) => {
+    if (els.fsamp) {
+      const fs = Number(data.fsamp);
+      els.fsamp.value =
+        Number.isFinite(fs) && fs > 0 ? String(Math.round(fs)) : "";
+    }
+    const participant = data?.participant_meta || {};
+    applyParticipantFields(els, participant);
+    if (els.bidsManufacturer && data?.manufacturer)
+      els.bidsManufacturer.value = data.manufacturer;
+    if (els.bidsDeviceModel && data?.manufacturers_model_name)
+      els.bidsDeviceModel.value = data.manufacturers_model_name;
+  },
+  getNwindows: () => Number(els.nwindows?.value) || 1,
+  hideLanding: () => {
+    if (els.landing) els.landing.classList.add("hidden");
+  },
 });
 
 const importStage = createImportStageService({
-  apiJson,
-  API_BASE,
+  api,
   setStatus: ui.setStatus,
   clearUploadFormatError: fileSession.clearUploadFormatError,
   setUploadLoading: fileSession.setUploadLoading,
@@ -511,7 +515,7 @@ export async function initializeApp() {
   if (els.browseSignalBtn) els.browseSignalBtn.disabled = true;
   ui.setStatus("Connecting to backend…", "muted");
 
-  const ready = await waitForBackend(`${API_BASE}${routes.health}`);
+  const ready = await waitForBackend(api.healthUrl());
   if (ready) {
     if (els.browseSignalBtn) els.browseSignalBtn.disabled = false;
     ui.setStatus("", "muted");

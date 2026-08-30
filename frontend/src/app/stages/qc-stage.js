@@ -22,9 +22,7 @@ export function createQcStageService(deps) {
   const {
     state,
     els,
-    API_BASE,
-    apiFetch,
-    apiJson,
+    api,
     drawMiniSeries,
     drawGridOverlay,
     setStatus,
@@ -43,6 +41,10 @@ export function createQcStageService(deps) {
     showWorkspace,
     nextFrame,
     updateStartAvailability,
+    resetBidsEntityDefaults: resetBidsEntityDefaultsFn,
+    applyPreviewMetadata,
+    getNwindows,
+    hideLanding,
   } = deps;
 
   function populateAuxSelector() {
@@ -60,7 +62,7 @@ export function createQcStageService(deps) {
     targetPoints = 96,
   ) {
     return requestQcGridWindowFeature(
-      { state, apiJson, apiFetch, API_BASE, renderChannelQC, setStatus },
+      { state, api, renderChannelQC, setStatus },
       gridIdx,
       start,
       end,
@@ -72,8 +74,7 @@ export function createQcStageService(deps) {
     return requestPreviewFeature(
       {
         state,
-        apiJson,
-        API_BASE,
+        api,
         setUploadLoading,
         updateProgress,
         populateAuxSelector,
@@ -89,7 +90,9 @@ export function createQcStageService(deps) {
         nextFrame,
         refreshVisuals,
         renderChannelQC,
-        els,
+        applyPreviewMetadata,
+        getNwindows,
+        hideLanding,
       },
       options,
     );
@@ -99,7 +102,7 @@ export function createQcStageService(deps) {
     return handleRawFileFeature(
       {
         state,
-        els,
+        resetBidsEntityDefaults: resetBidsEntityDefaultsFn,
         requestPreview,
         setStatus,
         updateStartAvailability,

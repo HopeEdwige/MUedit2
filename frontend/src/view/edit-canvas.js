@@ -14,6 +14,8 @@ import {
   setEditPulseSelection,
   setEditView,
 } from "../state/actions.js";
+import { computeInstantaneousDr } from "../editing/operations.js";
+import { renderSelectPair } from "./select-renderers.js";
 
 const TIMELINE_PAD_L = 38;
 const TIMELINE_PAD_R = 8;
@@ -101,6 +103,25 @@ function createDragState(canvas, getCanvasPlotMetrics, pxToSample) {
       dragging = false;
     },
   };
+}
+
+export function renderEditDropdownsView(els, model) {
+  const gridOptions = model.gridNames.map((name, idx) => ({
+    value: idx,
+    label: `Grid ${idx + 1}${name ? ` • ${name}` : ""}`,
+  }));
+  const muOptions = model.muOptions.map((muIdx) => ({
+    value: muIdx,
+    label: `MU ${muIdx + 1}`,
+  }));
+  renderSelectPair(
+    els.editMuGridSelect,
+    els.editMuSelect,
+    gridOptions,
+    muOptions,
+    model.targetGrid,
+    model.currentMu,
+  );
 }
 
 export function renderEditExplorer(deps) {
@@ -195,21 +216,11 @@ export function renderInstantaneousDr(deps) {
     drawSeries(canvas, [], COLORS.warning);
     return;
   }
-  const series = new Array(total).fill(0);
-  const markers = [];
-  const markerVals = [];
-  for (let i = 0; i < spikes.length - 1; i++) {
-    const isi = spikes[i + 1] - spikes[i];
-    if (isi <= 0) continue;
-    const dr = state.edit.fsamp ? state.edit.fsamp / isi : 0;
-    const mid = Math.min(
-      total - 1,
-      Math.max(0, Math.round(spikes[i] + isi / 2)),
-    );
-    series[mid] = dr;
-    markers.push(mid);
-    markerVals.push(dr);
-  }
+  const { series, markers, markerVals } = computeInstantaneousDr(
+    spikes,
+    state.edit.fsamp,
+    total,
+  );
   const drSelection = state.edit.selectionDr || state.edit.draftSelectionDr;
   drawSeries(
     canvas,

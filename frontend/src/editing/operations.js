@@ -2,6 +2,7 @@ import {
   clearEditHistoryForMu,
   clearAllEditSelections,
   resetEditSlice,
+  appendEditMu,
   setEditBackup,
   setEditCurrentMu,
   setEditCurrentMuGrid,
@@ -118,11 +119,38 @@ export function refreshEditTotals(state) {
   setEditTotalSamples(state, getEditTotalSamples(state));
 }
 
+// Compute the dropdown model: which grid to select, which MU list to show,
+// and whether the current grid/MU needs switching. Pure logic — no DOM,
+// no state mutation. The caller applies mutations and renders.
+export function buildEditDropdownModel(state, getEditMuIndices) {
+  const gridNames = state.edit.gridNames || [];
+  let targetGrid = state.edit.currentMuGrid || 0;
+  let mus = getEditMuIndices(targetGrid);
+  if (!mus.length && gridNames.length) {
+    for (let g = 0; g < gridNames.length; g++) {
+      const list = getEditMuIndices(g);
+      if (list.length) {
+        targetGrid = g;
+        mus = list;
+        break;
+      }
+    }
+  }
+  const currentMu = state.edit.currentMu;
+  const needsMuSwitch = mus.length && !mus.includes(currentMu);
+  return {
+    gridNames,
+    targetGrid,
+    muOptions: mus,
+    currentMu: needsMuSwitch ? mus[0] : currentMu,
+    needsGridSwitch: targetGrid !== (state.edit.currentMuGrid || 0),
+    needsMuSwitch,
+  };
+}
+
 export function resetEditState(deps) {
-  const { state, els, refreshEditModeButtons } = deps;
+  const { state, refreshEditModeButtons } = deps;
   resetEditSlice(state);
-  if (els.editSaveBtn) els.editSaveBtn.disabled = true;
-  if (els.bidsProject) els.bidsProject.value = "";
   refreshEditModeButtons();
 }
 
@@ -131,11 +159,10 @@ export function resetEditState(deps) {
 export function addSpikesInSelection(deps, sel) {
   const {
     state,
-    els,
     getRawPulse,
     backupEditMu,
     getPulseViewMeta,
-    getCanvasPlotMetrics,
+    getPulsePlotHeight,
     requestRoiEdit,
   } = deps;
 
@@ -146,11 +173,7 @@ export function addSpikesInSelection(deps, sel) {
   const { s, e, minVal, span } = getPulseViewMeta();
   const start = Math.max(s, Math.min(e, sel.start ?? sel[0]));
   const end = Math.max(start + 1, Math.min(e, sel.end ?? sel[1]));
-  const canvas = els.editPulseCanvas;
-  const metrics = canvas
-    ? getCanvasPlotMetrics(canvas, true)
-    : { plotHeight: 1 };
-  const height = metrics.plotHeight || 1;
+  const height = getPulsePlotHeight();
   const y1 = Math.max(0, Math.min(height, sel.yMin ?? 0));
   const y2 = Math.max(0, Math.min(height, sel.yMax ?? height));
   const yLowPx = Math.max(y1, y2);
@@ -169,11 +192,10 @@ export function addSpikesInSelection(deps, sel) {
 export function addArtifactInSelection(deps, sel) {
   const {
     state,
-    els,
     getRawPulse,
     backupEditMu,
     getPulseViewMeta,
-    getCanvasPlotMetrics,
+    getPulsePlotHeight,
     requestRoiEdit,
   } = deps;
 
@@ -184,11 +206,7 @@ export function addArtifactInSelection(deps, sel) {
   const { s, e, minVal, span } = getPulseViewMeta();
   const start = Math.max(s, Math.min(e, sel.start ?? sel[0]));
   const end = Math.max(start + 1, Math.min(e, sel.end ?? sel[1]));
-  const canvas = els.editPulseCanvas;
-  const metrics = canvas
-    ? getCanvasPlotMetrics(canvas, true)
-    : { plotHeight: 1 };
-  const height = metrics.plotHeight || 1;
+  const height = getPulsePlotHeight();
   const y1 = Math.max(0, Math.min(height, sel.yMin ?? 0));
   const y2 = Math.max(0, Math.min(height, sel.yMax ?? height));
   const yLowPx = Math.max(y1, y2);
@@ -207,11 +225,10 @@ export function addArtifactInSelection(deps, sel) {
 export function deleteSpikesInSelection(deps, sel) {
   const {
     state,
-    els,
     getRawPulse,
     backupEditMu,
     getPulseViewMeta,
-    getCanvasPlotMetrics,
+    getPulsePlotHeight,
     requestRoiEdit,
   } = deps;
 
@@ -222,11 +239,7 @@ export function deleteSpikesInSelection(deps, sel) {
   const { s, e, minVal, span } = getPulseViewMeta();
   const start = Math.max(s, Math.min(e, sel.start ?? sel[0]));
   const end = Math.max(start + 1, Math.min(e, sel.end ?? sel[1]));
-  const canvas = els.editPulseCanvas;
-  const metrics = canvas
-    ? getCanvasPlotMetrics(canvas, true)
-    : { plotHeight: 1 };
-  const height = metrics.plotHeight || 1;
+  const height = getPulsePlotHeight();
   const y1 = Math.max(0, Math.min(height, sel.yMin ?? 0));
   const y2 = Math.max(0, Math.min(height, sel.yMax ?? height));
   const yVal1 = minVal + (1 - y1 / height) * span;
@@ -246,24 +259,14 @@ export function deleteSpikesInSelection(deps, sel) {
 }
 
 export function deleteDrInSelection(deps, sel) {
-  const {
-    state,
-    els,
-    backupEditMu,
-    getCanvasPlotMetrics,
-    getRawPulse,
-    requestRoiEdit,
-  } = deps;
+  const { state, backupEditMu, getDrPlotHeight, getRawPulse, requestRoiEdit } =
+    deps;
 
   const muIdx = state.edit.currentMu ?? 0;
   const spikes = state.edit.distimes?.[muIdx] || [];
   if (spikes.length < 2) return;
   backupEditMu();
-  const canvas = els.editDrCanvas;
-  const metrics = canvas
-    ? getCanvasPlotMetrics(canvas, true)
-    : { plotHeight: 1 };
-  const height = metrics.plotHeight || 1;
+  const height = getDrPlotHeight();
   const yMinPx = Math.min(sel.yMin ?? 0, sel.yMax ?? height);
   const yMaxPx = Math.max(sel.yMin ?? 0, sel.yMax ?? height);
   const fs = state.edit.fsamp || 2000;
@@ -289,6 +292,28 @@ export function deleteDrInSelection(deps, sel) {
 }
 
 // --- MU mutations ---
+
+// Compute instantaneous discharge rate series from spike times. Pure
+// signal-processing — no DOM, no state. Extracted from edit-canvas.js so
+// the view layer only renders, never computes domain data.
+export function computeInstantaneousDr(spikes, fsamp, totalSamples) {
+  const series = new Array(totalSamples).fill(0);
+  const markers = [];
+  const markerVals = [];
+  for (let i = 0; i < spikes.length - 1; i++) {
+    const isi = spikes[i + 1] - spikes[i];
+    if (isi <= 0) continue;
+    const dr = fsamp ? fsamp / isi : 0;
+    const mid = Math.min(
+      totalSamples - 1,
+      Math.max(0, Math.round(spikes[i] + isi / 2)),
+    );
+    series[mid] = dr;
+    markers.push(mid);
+    markerVals.push(dr);
+  }
+  return { series, markers, markerVals };
+}
 
 export function duplicateMu(deps) {
   const {
@@ -320,18 +345,8 @@ export function duplicateMu(deps) {
   const newUid = `${prefix}${newCount}`;
 
   const newIdx = state.edit.distimes.length;
-  state.edit.distimes.push([...(distimes || [])]);
-  state.edit.pulseTrains.push([...(pulse || [])]);
-  if (!state.edit.originalDistimes) state.edit.originalDistimes = [];
-  state.edit.originalDistimes.push([...(distimes || [])]);
-  if (!state.edit.originalPulseTrains) state.edit.originalPulseTrains = [];
-  state.edit.originalPulseTrains.push([...(pulse || [])]);
-  state.edit.muGridIndex.push(gridIdx);
+  appendEditMu(state, { distimes, pulseTrain: pulse, gridIdx, uid: newUid });
   ensureEditFlagged();
-  state.edit.flagged.push(false);
-  state.edit.muUids.push(newUid);
-  if (!state.edit.artifactTimes) state.edit.artifactTimes = [];
-  state.edit.artifactTimes.push([]);
 
   if (deps.appendEditHistory) {
     const sourceUid = muUidFor(state, muIdx);
