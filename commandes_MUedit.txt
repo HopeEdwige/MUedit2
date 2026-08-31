@@ -1,0 +1,4 @@
+cd C:\Users\hdodo\OneDrive\Documents\'M2 IBIOM'\STAGE\CODE\MUedit2
+conda activate MUedit
+.\scripts\run_MUedit.ps1
+
