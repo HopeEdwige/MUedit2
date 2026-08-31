@@ -16,6 +16,10 @@ def bandpass_signals(signal: np.ndarray, fsamp: float, emg_type: int = 1) -> np.
     if emg_type == 1:
         b, a = butter(2, [20, 500], btype="bandpass", fs=fsamp)
     else:
+        if fsamp <= 8800:
+            raise ValueError(
+                f"Intramuscular bandpass (100-4400 Hz) requires fsamp > 8800 Hz; got {fsamp} Hz."
+            )
         b, a = butter(3, [100, 4400], btype="bandpass", fs=fsamp)
 
     return filtfilt(b, a, signal, axis=-1)

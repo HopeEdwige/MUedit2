@@ -114,42 +114,6 @@ def parse_json_object(raw: str | None, field_name: str) -> dict | None:
     return parsed
 
 
-def as_int(value: Any, field_name: str, default: int | None = None) -> int:
-    """Coerce value to int, raising HTTP 400 with field context if invalid."""
-    if value is None:
-        if default is not None:
-            return default
-        raise HTTPException(
-            status_code=400,
-            detail={"field": field_name, "reason": "Missing required integer value"},
-        )
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"field": field_name, "reason": "Expected integer value"},
-        ) from exc
-
-
-def as_float(value: Any, field_name: str, default: float | None = None) -> float:
-    """Coerce value to float, raising HTTP 400 with field context if invalid."""
-    if value is None:
-        if default is not None:
-            return default
-        raise HTTPException(
-            status_code=400,
-            detail={"field": field_name, "reason": "Missing required float value"},
-        )
-    try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"field": field_name, "reason": "Expected numeric value"},
-        ) from exc
-
-
 def safe_unlink(path: str) -> None:
     """Best-effort file removal without propagating OS errors."""
     try:
@@ -194,9 +158,6 @@ def make_json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [make_json_safe(v) for v in value]
     return value
-
-
-json_default = make_json_safe
 
 
 def _pack_json_f32_payload(magic: bytes, meta: dict[str, Any], *arrays: np.ndarray) -> bytes:

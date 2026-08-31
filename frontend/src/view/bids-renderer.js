@@ -1,3 +1,5 @@
+import { naToEmpty } from "../io/bids.js";
+
 function makeInfoItem(label, value) {
   const row = document.createElement("div");
   row.className = "auto-info-item";
@@ -8,6 +10,28 @@ function makeInfoItem(label, value) {
   row.appendChild(l);
   row.appendChild(v);
   return row;
+}
+
+export function resetBidsEntityDefaults(els, fileName) {
+  if (els.bidsSubject) els.bidsSubject.value = "1";
+  if (els.bidsSession) els.bidsSession.value = "1";
+  if (els.bidsAcquisition) els.bidsAcquisition.value = "";
+  if (els.bidsRun) els.bidsRun.value = "";
+  if (els.bidsTask) els.bidsTask.value = "trapezoid";
+  if (els.fileName && fileName) {
+    els.fileName.textContent = fileName;
+    els.fileName.classList.remove("loading");
+  }
+}
+
+export function applyParticipantFields(els, participant) {
+  if (!participant) return;
+  if (els.bidsParticipantAge && participant.age != null)
+    els.bidsParticipantAge.value = naToEmpty(participant.age);
+  if (els.bidsParticipantSex && participant.sex != null)
+    els.bidsParticipantSex.value = naToEmpty(participant.sex);
+  if (els.bidsParticipantHandedness && participant.handedness != null)
+    els.bidsParticipantHandedness.value = naToEmpty(participant.handedness);
 }
 
 export function renderBidsAutoInfo(els, model) {
@@ -106,12 +130,7 @@ export function applySessionInfoToDom(els, payload) {
     els.bidsRun.value = payload.entities.run;
 
   // Pre-fill participant fields from BIDS sidecar.
-  if (els.bidsParticipantAge && payload.participant?.age)
-    els.bidsParticipantAge.value = payload.participant.age;
-  if (els.bidsParticipantSex && payload.participant?.sex)
-    els.bidsParticipantSex.value = payload.participant.sex;
-  if (els.bidsParticipantHandedness && payload.participant?.handedness)
-    els.bidsParticipantHandedness.value = payload.participant.handedness;
+  applyParticipantFields(els, payload.participant);
 
   // Pre-fill hardware fields from BIDS sidecar or auto-detected loader metadata.
   if (

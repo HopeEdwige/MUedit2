@@ -3,29 +3,38 @@
 from __future__ import annotations
 
 import numpy as np
-from scipy.cluster.vq import kmeans2
 from scipy.linalg import eigh, inv
-from scipy.signal import find_peaks
+
+from muedit.signal.decomp_primitives import (
+    DECOMP_MIN_ISI_SEC,
+    extend_signal,
+    find_refractory_peaks,
+    isi_cov,
+    signed_square,
+    split_by_amplitude,
+)
 
 _FIXED_POINT_TOL = 1e-4
 _FIXED_POINT_MAXITER = 500
-_MIN_ISI_SEC = 0.02
+_MIN_ISI_SEC = DECOMP_MIN_ISI_SEC
 _KMEANS_ITER = 10
 DEDUP_MAXLAG_RATIO: int = 40
 DEDUP_JITTER: float = 0.00025
 
-
-def extend_signal(signal: np.ndarray, exfactor: int) -> np.ndarray:
-    """Create delayed channel extension used by convolutive source separation."""
-    rows, cols = signal.shape
-    extended_rows = rows * exfactor
-    extended_cols = cols + exfactor - 1
-    esample = np.zeros((extended_rows, extended_cols))
-
-    for m in range(exfactor):
-        esample[m * rows:(m + 1) * rows, m:cols + m] = signal
-
-    return esample
+__all__ = [
+    "DEDUP_JITTER",
+    "DEDUP_MAXLAG_RATIO",
+    "batch_process_filters",
+    "compute_silhouette",
+    "extend_signal",
+    "fixed_point_alg",
+    "get_spikes",
+    "minimize_isi_covariance",
+    "pca_extended_signal",
+    "rem_duplicates",
+    "subtract_mu_waveforms",
+    "whiten_extended_signal",
+]
 
 
 def pca_extended_signal(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -44,13 +53,15 @@ def pca_extended_signal(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     max_last_eig = np.sum(eigenvalues > rank_tolerance)
     if 0 < max_last_eig < signal.shape[0]:
-        lower_limit_value = (
-            eigenvalues[max_last_eig - 1] + eigenvalues[max_last_eig]
-        ) / 2
+        lower_limit_value = (eigenvalues[max_last_eig - 1] + eigenvalues[max_last_eig]) / 2
     else:
         lower_limit_value = rank_tolerance
 
-    mask = eigenvalues > lower_limit_value
+    mask = eigenvalues > max(lower_limit_value, 1e-10 * eigenvalues[0])
+    if not mask.any():
+        raise ValueError(
+            "Degenerate window: covariance has no positive eigenvalues (flat channels?)"
+        )
     eigenvectors_selected = eigenvectors[:, mask]
     eigenvalues_diag = np.diag(eigenvalues[mask])
 
@@ -82,11 +93,11 @@ def fixed_point_alg(
 ) -> np.ndarray:
     """Run one-unit FastICA fixed-point iterations with orthogonalization."""
     k = 0
-    delta = np.ones(maxiter)
+    delta = 1.0
     basis_bt = basis @ basis.T
     n_samples = x.shape[1]
 
-    while delta[k] > _FIXED_POINT_TOL and k < maxiter - 1:
+    while delta > _FIXED_POINT_TOL and k < maxiter - 1:
         w_last = w.copy()
         wtx = w_last.T @ x
 
@@ -111,7 +122,7 @@ def fixed_point_alg(
         w = w / w_norm
 
         k += 1
-        delta[k] = abs(abs(np.dot(w.flatten(), w_last.flatten())) - 1)
+        delta = abs(abs(np.dot(w.flatten(), w_last.flatten())) - 1)
 
     return w
 
@@ -119,14 +130,12 @@ def fixed_point_alg(
 def _pulse_train(w: np.ndarray, x: np.ndarray) -> np.ndarray:
     """Project source and apply signed-squared nonlinearity."""
     wtx = w.T @ x
-    return (wtx * np.abs(wtx)).flatten()
+    return signed_square(wtx).flatten()
 
 
 def _detect_peaks(icasig: np.ndarray, fsamp: float) -> np.ndarray:
     """Detect candidate spikes with refractory-distance peak picking."""
-    distance = int(np.round(fsamp * _MIN_ISI_SEC))
-    spikes, _ = find_peaks(icasig, distance=distance)
-    return spikes
+    return find_refractory_peaks(icasig, fsamp, min_isi_sec=_MIN_ISI_SEC)
 
 
 def get_spikes(
@@ -141,9 +150,7 @@ def get_spikes(
     if len(spikes) <= 1:
         return icasig, np.asarray(spikes, dtype=int)
 
-    centroids, labels = kmeans2(icasig[spikes], 2, iter=_KMEANS_ITER, minit="++", missing="raise", seed=0)
-    idx2 = int(np.argmax(centroids))
-    spikes2 = spikes[labels == idx2]
+    spikes2, _, _ = split_by_amplitude(icasig, spikes, kmeans_iter=_KMEANS_ITER)
 
     vals = icasig[spikes2]
     threshold = np.mean(vals) + 3 * np.std(vals)
@@ -174,13 +181,12 @@ def minimize_isi_covariance(
         if len(spikes) < 2:
             break
 
-        isi = np.diff(spikes) / fsamp
-        cov = np.std(isi) / np.mean(isi)
+        cov = isi_cov(spikes, fsamp)
 
         w = np.sum(x[:, spikes], axis=1)
 
     if len(spikes_last) < 2:
-        _, spikes_last = get_spikes(w, x, fsamp)
+        _, spikes_last = get_spikes(w_last, x, fsamp)
 
     return w_last, spikes_last, cov_last
 
@@ -197,12 +203,10 @@ def compute_silhouette(
     if len(spikes) <= 1:
         return icasig, np.array(spikes, dtype=int), 0.0
 
-
-    centroids, labels = kmeans2(icasig[spikes], 2, iter=_KMEANS_ITER, minit="++", missing="raise", seed=0)
+    spikes2, centroids, labels = split_by_amplitude(icasig, spikes, kmeans_iter=_KMEANS_ITER)
 
     idx2 = int(np.argmax(centroids))
     other_idx = 1 - idx2
-    spikes2 = spikes[labels == idx2]
 
     spike_cluster_vals = icasig[spikes][labels == idx2]
     within = float(np.sum((spike_cluster_vals - centroids[idx2]) ** 2))
@@ -212,27 +216,6 @@ def compute_silhouette(
     sil = (between - within) / denom if denom > 0 else 0.0
 
     return icasig, spikes2, sil
-
-
-def extract_muap_segments(
-    mu_pulses: np.ndarray,
-    length_radius: int,
-    y: np.ndarray,
-) -> np.ndarray:
-    """Extract waveform snippets around pulse indices."""
-    pulses = np.asarray(mu_pulses, dtype=int).reshape(-1)
-    window_size = 2 * length_radius + 1
-    if pulses.size == 0:
-        return np.zeros((0, window_size))
-
-    valid_mask = (pulses >= length_radius) & (pulses < len(y) - length_radius)
-    valid_pulses = pulses[valid_mask]
-    if valid_pulses.size == 0:
-        return np.zeros((0, window_size))
-
-    offsets = np.arange(-length_radius, length_radius + 1, dtype=int)
-    idx = valid_pulses[:, None] + offsets[None, :]
-    return np.asarray(y, dtype=float)[idx]
 
 
 def subtract_mu_waveforms(
@@ -253,7 +236,7 @@ def subtract_mu_waveforms(
     # Extract all segments at once: (n_rows, n_spikes, window_size)
     offsets = np.arange(-window_l, window_l + 1, dtype=int)
     idx = valid_spikes[:, None] + offsets[None, :]  # (n_spikes, window_size)
-    waveforms = x[:, idx].mean(axis=1)              # (n_rows, window_size)
+    waveforms = x[:, idx].mean(axis=1)  # (n_rows, window_size)
 
     # Scatter-add: stamp mean waveform at each spike position.
     # Loop is over n_spikes (~80), not n_rows (~1024) — each iteration is a
@@ -272,8 +255,23 @@ def batch_process_filters(
     ltime: int,
     fsamp: float,
     nwindows_per_grid: int,
+    whiten_mat_by_window: dict[int, np.ndarray] | None = None,
+    full_extended_by_window: dict[int, np.ndarray] | None = None,
+    win_means_by_window: dict[int, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
-    """Apply MU filters across windows and reconstruct pulse trains/spike times."""
+    """Apply MU filters across windows and reconstruct pulse trains/spike times.
+
+    When ``full_extended_by_window`` and ``whiten_mat_by_window`` are provided,
+    each filter is dewhitened (``w @ W``) and projected onto the full extended
+    signal of its window, producing pulse trains over the entire trace instead
+    of only the decomposed windows.
+
+    ``full_extended_by_window`` holds the *raw* (non-demeaned) extended signal,
+    shared per grid. When ``win_means_by_window`` is also provided, the
+    per-window DC baseline is removed as a cheap additive correction so the
+    dewhitened filter is applied to the same baseline it was estimated on,
+    without building a per-window extended array.
+    """
     total_mus = 0
     for nwin in mu_filters_by_window:
         if mu_filters_by_window[nwin].size > 0:
@@ -296,26 +294,48 @@ def batch_process_filters(
         for j in range(n_filters):
             current_filter = filters[:, j]
 
-            for nwin2 in whitened_windows:
-                if nwin2 // max(1, nwindows_per_grid) != grid_idx:
-                    continue
-                start = coordinates[nwin2 * 2]
-                segment_len = whitened_windows[nwin2].shape[1]
-                pt_segment = np.dot(current_filter, whitened_windows[nwin2])
-                if start + segment_len <= ltime:
-                    pulse_t[mu_nb, start : start + segment_len] = pt_segment
-                else:
-                    valid_len = ltime - start
-                    pulse_t[mu_nb, start:ltime] = pt_segment[:valid_len]
+            if full_extended_by_window is not None and whiten_mat_by_window is not None:
+                w_dewhite = current_filter @ whiten_mat_by_window[nwin]
+                raw_ext = full_extended_by_window[nwin]
+                pt_full = w_dewhite @ raw_ext
+                # Remove the window's per-channel DC baseline as an additive
+                # correction: w_dewhite @ extend(A - m) == w_dewhite @ extend(A)
+                # - corr, avoiding a per-window extended array.
+                if win_means_by_window is not None:
+                    win_mean = win_means_by_window[nwin]
+                    n_ch = win_mean.size
+                    ex_factor = w_dewhite.size // n_ch
+                    ext_cols = raw_ext.shape[1]
+                    n_samples = ext_cols - ex_factor + 1
+                    s = np.array(
+                        [w_dewhite[k * n_ch : (k + 1) * n_ch] @ win_mean for k in range(ex_factor)]
+                    )
+                    corr = np.zeros(ext_cols)
+                    for k in range(ex_factor):
+                        corr[k : n_samples + k] += s[k]
+                    pt_full = pt_full - corr
+                pulse_t[mu_nb, :ltime] = pt_full[:ltime]
+            else:
+                for nwin2 in whitened_windows:
+                    if nwin2 // max(1, nwindows_per_grid) != grid_idx:
+                        continue
+                    start = coordinates[nwin2 * 2]
+                    segment_len = whitened_windows[nwin2].shape[1]
+                    pt_segment = np.dot(current_filter, whitened_windows[nwin2])
+                    if start + segment_len <= ltime:
+                        pulse_t[mu_nb, start : start + segment_len] = pt_segment
+                    else:
+                        valid_len = ltime - start
+                        pulse_t[mu_nb, start:ltime] = pt_segment[:valid_len]
 
-            pulse_t[mu_nb, :] = pulse_t[mu_nb, :] * np.abs(pulse_t[mu_nb, :])
-            distance = int(np.round(fsamp * _MIN_ISI_SEC))
-            spikes, _ = find_peaks(pulse_t[mu_nb, :], distance=distance)
+            pulse_t[mu_nb, :] = signed_square(pulse_t[mu_nb, :])
+            spikes = find_refractory_peaks(pulse_t[mu_nb, :], fsamp, min_isi_sec=_MIN_ISI_SEC)
 
             if len(spikes) > 1:
-                centroids, labels = kmeans2(pulse_t[mu_nb, spikes], 2, iter=10, minit="++", missing="raise", seed=0)
-                idx = np.argmax(centroids)
-                distime.append(spikes[labels == idx])
+                high_spikes, _, _ = split_by_amplitude(
+                    pulse_t[mu_nb, :], spikes, kmeans_iter=_KMEANS_ITER
+                )
+                distime.append(high_spikes)
             else:
                 distime.append(spikes)
 
@@ -395,9 +415,7 @@ def rem_duplicates(
                 if corr_val > best_corr:
                     best_corr = corr_val
                     best_lag = lag
-            aligned_target = (
-                target_expanded + best_lag if best_corr > 0.2 else target_expanded
-            )
+            aligned_target = target_expanded + best_lag if best_corr > 0.2 else target_expanded
             common = np.intersect1d(ref_expanded, aligned_target)
             if len(common) > 0:
                 common = np.sort(common)
@@ -411,33 +429,24 @@ def rem_duplicates(
             len_ref = len(distime[i])
             len_target = len(distime[j])
 
-            score = (
-                n_common / max(len_ref, len_target)
-                if max(len_ref, len_target) > 0
-                else 0
-            )
+            score = n_common / max(len_ref, len_target) if max(len_ref, len_target) > 0 else 0
             if score >= tol:
                 duplicates.append(j)
 
-        if len(duplicates) > 0:
-            covs = []
-            for idx_dup in duplicates:
-                spikes = distime[idx_dup]
-                if len(spikes) > 1:
-                    isi = np.diff(spikes)
-                    cov = np.std(isi) / np.mean(isi) if np.mean(isi) > 0 else 100
-                else:
-                    cov = 100
-                covs.append(cov)
+        covs = []
+        for idx_dup in duplicates:
+            spikes = distime[idx_dup]
+            cov = isi_cov(spikes, 1.0, fallback=100.0)
+            covs.append(cov)
 
-            best_idx_local = int(np.argmin(covs))
-            best_idx = duplicates[best_idx_local]
+        best_idx_local = int(np.argmin(covs))
+        best_idx = duplicates[best_idx_local]
 
-            distimenew.append(distime[best_idx])
-            pulsenew.append(pulse_t[best_idx, :])
-            kept_indices.append(best_idx)
+        distimenew.append(distime[best_idx])
+        pulsenew.append(pulse_t[best_idx, :])
+        kept_indices.append(best_idx)
 
-            for idx_dup in duplicates:
-                active_mus[idx_dup] = False
+        for idx_dup in duplicates:
+            active_mus[idx_dup] = False
 
     return np.array(pulsenew), distimenew, kept_indices

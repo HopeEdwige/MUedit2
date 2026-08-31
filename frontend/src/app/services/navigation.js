@@ -226,6 +226,7 @@ export function handleKeyboardNavigation(deps, e) {
     adjustViewFn,
     setViewForStageFn,
     setShowBookmark,
+    applyLabeledToggle,
   } = deps;
 
   const active = document.activeElement;
@@ -273,37 +274,29 @@ export function handleKeyboardNavigation(deps, e) {
       return;
     } else if (key === "p") {
       if (els.editPeelOffToggle) {
-        const isOn = els.editPeelOffToggle.dataset.state === "on";
-        els.editPeelOffToggle.dataset.state = isOn ? "off" : "on";
-        els.editPeelOffToggle.setAttribute(
-          "aria-pressed",
-          isOn ? "false" : "true",
+        applyLabeledToggle(
+          els.editPeelOffToggle,
+          els.editPeelOffToggle.dataset.state !== "on",
+          {
+            shortSel: ".peeloff-short",
+            fullSel: ".peeloff-full",
+            prefix: "Peel-off",
+          },
         );
-        els.editPeelOffToggle.classList.toggle("on", !isOn);
-        const label = isOn ? "Off" : "On";
-        const shortEl = els.editPeelOffToggle.querySelector(".peeloff-short");
-        const fullEl = els.editPeelOffToggle.querySelector(".peeloff-full");
-        if (shortEl) shortEl.textContent = label;
-        if (fullEl) fullEl.textContent = `Peel-off: ${label}`;
       }
       e.preventDefault();
       return;
     } else if (key === "l") {
       if (els.editLockSpikesToggle) {
-        const isOn = els.editLockSpikesToggle.dataset.state === "on";
-        els.editLockSpikesToggle.dataset.state = isOn ? "off" : "on";
-        els.editLockSpikesToggle.setAttribute(
-          "aria-pressed",
-          isOn ? "false" : "true",
+        applyLabeledToggle(
+          els.editLockSpikesToggle,
+          els.editLockSpikesToggle.dataset.state !== "on",
+          {
+            shortSel: ".lockspikes-short",
+            fullSel: ".lockspikes-full",
+            prefix: "Lock",
+          },
         );
-        els.editLockSpikesToggle.classList.toggle("on", !isOn);
-        const label = isOn ? "Off" : "On";
-        const shortEl =
-          els.editLockSpikesToggle.querySelector(".lockspikes-short");
-        const fullEl =
-          els.editLockSpikesToggle.querySelector(".lockspikes-full");
-        if (shortEl) shortEl.textContent = label;
-        if (fullEl) fullEl.textContent = `Lock: ${label}`;
       }
       e.preventDefault();
       return;

@@ -15,6 +15,7 @@ from muedit.decomp.algorithm import (
     DEDUP_JITTER,
     DEDUP_MAXLAG_RATIO,
     batch_process_filters,
+    extend_signal,
     rem_duplicates,
 )
 from muedit.decomp.preview import build_preview_payload
@@ -25,7 +26,6 @@ from muedit.decomp.types import (
     PostprocessStepOutput,
     PreprocessStepOutput,
 )
-from muedit.io.bids import build_entities
 from muedit.models import DecompositionExport, DecompositionSignalExport
 
 logger = logging.getLogger(__name__)
@@ -115,16 +115,14 @@ def _save_npz_with_app_schema(
         payload.update(extras)
     np.savez_compressed(out_path, **payload)
 
-    
+
 def postprocess_step(
     prep: PreprocessStepOutput,
     decomposed: DecomposeStepOutput,
     params: DecompositionParameters,
-    bids_root: str | None,
-    bids_entities: dict[str, Any] | None,
     progress_cb: Callable[[str, dict[str, Any]], None] | None,
 ) -> PostprocessStepOutput:
-    """Batch filters, remove duplicates, and optionally save BIDS decomposition output."""
+    """Batch filters and remove duplicates."""
     logger.info("Batch processing...")
     if progress_cb:
         progress_cb("progress", {"message": "Batch processing filters", "pct": 92})
@@ -157,6 +155,27 @@ def postprocess_step(
             adapt_sv=params.adapt_sv,
         )
     else:
+        full_extended_by_window: dict[int, np.ndarray] | None = None
+        if params.full_trace:
+            full_extended_by_window = {}
+            ch_idx_g = 0
+            grid_full_ext: dict[int, np.ndarray] = {}
+            for i in range(prep.ngrid):
+                mask = np.array(prep.discard_channels[i]).astype(int)
+                n_ch_g = mask.size
+                keep_idx = np.where(mask == 0)[0]
+                grid_raw = prep.data[ch_idx_g + keep_idx, :]
+                ex_factor = int(round(params.nbextchan / max(1, grid_raw.shape[0])))
+                # Raw (non-demeaned) extended signal, shared across the grid's
+                # windows. The per-window DC baseline is removed as an additive
+                # correction inside batch_process_filters via win_means.
+                grid_full_ext[i] = extend_signal(grid_raw, ex_factor)
+                ch_idx_g += n_ch_g
+            for nwin in decomposed.mu_filters:
+                grid_idx = nwin // max(1, nwindows)
+                full_extended_by_window[nwin] = grid_full_ext[grid_idx]
+            logger.info("Applying MU filters over the full trace (dewhitened).")
+
         pulse_t, distime = batch_process_filters(
             decomposed.mu_filters,
             decomposed.w_sig,
@@ -164,6 +183,9 @@ def postprocess_step(
             prep.data.shape[1],
             prep.fsamp,
             nwindows,
+            whiten_mat_by_window=decomposed.whiten_mat if full_extended_by_window else None,
+            full_extended_by_window=full_extended_by_window,
+            win_means_by_window=decomposed.win_means if full_extended_by_window else None,
         )
 
     pulse_t, distime, mu_grid_index = _remove_duplicates_by_grid(
@@ -174,37 +196,6 @@ def postprocess_step(
         params,
         prep.fsamp,
     )
-
-    if bids_root and pulse_t.size > 0:
-        subj = (bids_entities or {}).get("subject", "01")
-        sess = (bids_entities or {}).get("session")
-        entity_label = build_entities(
-            subject=subj,
-            task=(bids_entities or {}).get("task", "task"),
-            run=(bids_entities or {}).get("run"),
-            session=sess,
-            acquisition=(bids_entities or {}).get("acquisition"),
-            recording=(bids_entities or {}).get("recording"),
-        )
-        decomp_dir = Path(bids_root) / "derivatives" / "muedit" / f"sub-{subj}"
-        if sess:
-            decomp_dir = decomp_dir / f"ses-{sess}"
-        decomp_dir = decomp_dir / "decomp"
-        decomp_dir.mkdir(parents=True, exist_ok=True)
-        out_path = decomp_dir / f"{entity_label}_decomp.npz"
-        _save_npz_with_app_schema(
-            out_path,
-            pulse_trains=pulse_t,
-            distimes=distime,
-            fsamp=prep.fsamp,
-            grid_names=prep.grid_names,
-            mu_grid_index=mu_grid_index,
-            muscles=prep.muscles,
-            parameters=asdict(params),
-            total_samples=prep.data.shape[1],
-            extras={"adaptive_losses": np.array([adaptive_losses], dtype=object)},
-        )
-        logger.info("Saved combined decomposition to %s", out_path)
 
     if progress_cb:
         progress_cb("progress", {"message": "Finalizing output", "pct": 97})

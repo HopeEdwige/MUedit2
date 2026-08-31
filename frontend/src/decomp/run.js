@@ -17,13 +17,12 @@ import {
   setSeriesLength,
   setUploadToken,
 } from "../state/actions.js";
-import { decodeDecomposePreviewPayload } from "../api/binary_payloads.js";
+import { roiStart, roiEnd } from "../state/selectors.js";
 import { normalizePreviewPayload } from "../api/payloads.js";
 
 export async function autoSaveRunDecomposition(deps) {
   const {
     state,
-    els,
     getSuggestedNpzName,
     persistNpzBySaveTarget,
     getBidsMuscleNames,
@@ -47,7 +46,7 @@ export async function autoSaveRunDecomposition(deps) {
       0,
       ...state.muDistimes.flatMap((d) => (d || []).map((v) => Number(v) || 0)),
     ) + 1;
-  const fs = Number(els.fsamp?.value);
+  const fs = state.fsamp;
   const payload = {
     distimes: state.muDistimes || [],
     pulse_trains: state.muPulseTrains || [],
@@ -84,11 +83,9 @@ export async function autoSaveRunDecomposition(deps) {
 export async function runDecomposition(deps) {
   const {
     state,
-    els,
-    API_BASE,
-    apiFetch,
+    api,
     getBidsProject,
-    getBidsMuscleNames,
+    collectBidsEntities,
     buildParams,
     updateStartAvailability,
     switchStage,
@@ -140,33 +137,7 @@ export async function runDecomposition(deps) {
     if (project) {
       formData.append("project", project);
     }
-    const bidsEntities = {};
-    const subject = String(els.bidsSubject?.value || "").trim();
-    const task = String(els.bidsTask?.value || "").trim();
-    const session = String(els.bidsSession?.value || "").trim();
-    const run = String(els.bidsRun?.value || "").trim();
-    if (subject) bidsEntities.subject = subject;
-    if (task) bidsEntities.task = task;
-    if (session) bidsEntities.session = session;
-    if (run) bidsEntities.run = run;
-    const muscleNames =
-      typeof getBidsMuscleNames === "function" ? getBidsMuscleNames() : [];
-    if (muscleNames.length) bidsEntities.target_muscle = muscleNames;
-    const powerlineFreq = Number(els.bidsPowerlineFreq?.value || 50);
-    if (powerlineFreq) bidsEntities.powerline_freq = powerlineFreq;
-    const manufacturer = String(els.bidsManufacturer?.value || "").trim();
-    if (manufacturer) bidsEntities.manufacturer = manufacturer;
-    const deviceModel = String(els.bidsDeviceModel?.value || "").trim();
-    if (deviceModel) bidsEntities.manufacturers_model_name = deviceModel;
-    const placementScheme = String(els.bidsPlacementScheme?.value || "").trim();
-    if (placementScheme) bidsEntities.placement_scheme = placementScheme;
-    const placementDesc = String(
-      els.bidsPlacementDescription?.value || "",
-    ).trim();
-    if (placementDesc)
-      bidsEntities.placement_scheme_description = placementDesc;
-    const taskDescription = String(els.bidsTaskDescription?.value || "").trim();
-    if (taskDescription) bidsEntities.task_description = taskDescription;
+    const bidsEntities = collectBidsEntities();
     if (Object.keys(bidsEntities).length) {
       formData.append("bids_entities", JSON.stringify(bidsEntities));
     }
@@ -180,13 +151,8 @@ export async function runDecomposition(deps) {
     let response;
     try {
       // Preferred path: reuse upload token from preview to avoid re-uploading the raw file.
-      response = await apiFetch(
-        `${API_BASE}/decompose_stream`,
-        {
-          method: "POST",
-          headers: {},
-          body: buildRunFormData(true),
-        },
+      response = await api.decomposeStream(
+        buildRunFormData(true),
         15 * 60 * 1000,
       );
     } catch (err) {
@@ -195,13 +161,8 @@ export async function runDecomposition(deps) {
         // Token can expire after backend restart/session loss; retry once with full file upload.
         setUploadToken(state, null);
         updateProgress(5, "Session expired, retrying with file upload...");
-        response = await apiFetch(
-          `${API_BASE}/decompose_stream`,
-          {
-            method: "POST",
-            headers: {},
-            body: buildRunFormData(false),
-          },
+        response = await api.decomposeStream(
+          buildRunFormData(false),
           15 * 60 * 1000,
         );
       } else {
@@ -253,11 +214,7 @@ export async function runDecomposition(deps) {
   } catch (err) {
     console.error(err);
     setStatus(`Error: ${err.message}`, "error");
-    if (els.runPhase) els.runPhase.textContent = "Failed";
-    if (els.progressText) {
-      els.progressText.textContent = "Run failed. Check console for details.";
-    }
-    updateProgress(0, "Idle");
+    updateProgress(0, "Run failed. Check console for details.", "error");
   } finally {
     setIsRunning(state, false);
     updateStartAvailability();
@@ -267,7 +224,6 @@ export async function runDecomposition(deps) {
 function applyPreviewData(deps, preview, options = {}) {
   const {
     state,
-    els,
     ensureDiscardMasks,
     renderChannelQC,
     getCurrentGrid,
@@ -280,6 +236,8 @@ function applyPreviewData(deps, preview, options = {}) {
     populateAuxSelector,
     renderAuxiliaryChannels,
     enableRoiSelection,
+    setNwindows,
+    emgCanvasId,
   } = deps;
   const { skipMuData = false } = options;
 
@@ -309,7 +267,7 @@ function applyPreviewData(deps, preview, options = {}) {
       state,
       rois.map((r) => ({ start: r[0] ?? r.start, end: r[1] ?? r.end })),
     );
-    if (els.nwindows) els.nwindows.value = state.rois.length;
+    if (setNwindows) setNwindows(state.rois.length);
   }
   if (grid_mean_abs && grid_names) {
     setGridSeries(state, grid_mean_abs);
@@ -329,39 +287,15 @@ function applyPreviewData(deps, preview, options = {}) {
     setMuscle(state, muscle);
   }
   if (!skipMuData) {
-    // Preview messages may deliver MU fields incrementally; update each slice independently
-    // while preserving previously populated slices.
-    if (pulse_trains_full && pulse_trains_full.length) {
-      setMuPreviewData(
-        state,
-        pulse_trains_full,
-        state.muDistimes,
-        state.muGridIndex,
-      );
-    } else if (pulse_trains_all) {
-      setMuPreviewData(
-        state,
-        pulse_trains_all,
-        state.muDistimes,
-        state.muGridIndex,
-      );
-    }
-    if (distime_all) {
-      setMuPreviewData(
-        state,
-        state.muPulseTrains,
-        distime_all,
-        state.muGridIndex,
-      );
-    }
-    if (mu_grid_index) {
-      setMuPreviewData(
-        state,
-        state.muPulseTrains,
-        state.muDistimes,
-        mu_grid_index,
-      );
-    }
+    // Preview messages may deliver MU fields incrementally; update each slice
+    // independently while preserving previously populated slices.
+    const newPulseTrains =
+      pulse_trains_full && pulse_trains_full.length
+        ? pulse_trains_full
+        : pulse_trains_all || state.muPulseTrains;
+    const newDistimes = distime_all || state.muDistimes;
+    const newGridIndex = mu_grid_index || state.muGridIndex;
+    setMuPreviewData(state, newPulseTrains, newDistimes, newGridIndex);
   }
   if (auxiliary) {
     setAuxData(state, auxiliary, auxiliary_names || []);
@@ -374,11 +308,11 @@ function applyPreviewData(deps, preview, options = {}) {
   const roiStream = state.rois?.[0];
   requestQcGridWindow(
     getCurrentGrid(),
-    Number.isFinite(roiStream?.start) ? roiStream.start : 0,
-    Number.isFinite(roiStream?.end) ? roiStream.end : state.seriesLength,
+    roiStart(roiStream),
+    roiEnd(roiStream, state.seriesLength),
   );
   setPreviewSeries(state, mean_abs);
-  const emgCanvas = els?.emgCanvas || "emgCanvas";
+  const emgCanvas = emgCanvasId || "emgCanvas";
   drawGridOverlay(
     emgCanvas,
     state.gridSeries,
@@ -393,26 +327,10 @@ function applyPreviewData(deps, preview, options = {}) {
 }
 
 async function hydrateBinaryDecomposePreview(deps) {
-  const { apiFetch, API_BASE, token, applyPreview, onError } = deps;
+  const { api, token, applyPreview, onError } = deps;
   try {
-    const res = await apiFetch(
-      `${API_BASE}/decompose_preview/${encodeURIComponent(token)}`,
-      {
-        method: "GET",
-        headers: { Accept: "application/octet-stream" },
-      },
-      120000,
-    );
-    const payload = await res.arrayBuffer();
-    // Binary hydration carries the full MU preview payload after the lightweight stream event.
-    applyPreview(
-      normalizePreviewPayload(
-        decodeDecomposePreviewPayload(
-          payload,
-          res.headers.get("x-muedit-format"),
-        ),
-      ),
-    );
+    const preview = await api.fetchDecomposePreview(token);
+    applyPreview(preview);
   } catch (err) {
     onError(err);
   }
@@ -421,11 +339,10 @@ async function hydrateBinaryDecomposePreview(deps) {
 export function handleStreamMessage(deps, msg) {
   const {
     state,
-    els,
-    apiFetch,
-    API_BASE,
+    api,
     setStatus,
     updateProgress,
+    setProgressText,
     ensureDiscardMasks,
     renderChannelQC,
     getCurrentGrid,
@@ -439,6 +356,8 @@ export function handleStreamMessage(deps, msg) {
     renderAuxiliaryChannels,
     enableRoiSelection,
     autoSaveRunDecomposition,
+    setNwindows,
+    emgCanvasId,
   } = deps;
 
   if (msg.stage === "error") {
@@ -459,7 +378,6 @@ export function handleStreamMessage(deps, msg) {
   if (msg.preview) {
     const commonPreviewDeps = {
       state,
-      els,
       ensureDiscardMasks,
       renderChannelQC,
       getCurrentGrid,
@@ -472,13 +390,11 @@ export function handleStreamMessage(deps, msg) {
       populateAuxSelector,
       renderAuxiliaryChannels,
       enableRoiSelection,
+      setNwindows,
+      emgCanvasId,
     };
 
-    if (
-      msg.preview.preview_binary_token &&
-      typeof apiFetch === "function" &&
-      API_BASE
-    ) {
+    if (msg.preview.preview_binary_token && api) {
       // Fast path: render immediate non-MU preview fields from stream event, then hydrate
       // heavy MU arrays asynchronously using the token endpoint.
       const previewNoToken = { ...msg.preview };
@@ -491,8 +407,7 @@ export function handleStreamMessage(deps, msg) {
         },
       );
       void hydrateBinaryDecomposePreview({
-        apiFetch,
-        API_BASE,
+        api,
         token: msg.preview.preview_binary_token,
         applyPreview: (previewPayload) =>
           applyPreviewData(
@@ -535,9 +450,7 @@ export function handleStreamMessage(deps, msg) {
     }
     const perGrid = counts.map((n, idx) => `Grid ${idx + 1}: ${n} MU`);
     const summaryText = `${perGrid.join(" • ")}${perGrid.length ? " • " : ""}Total: ${totalMu} MU`;
-    if (els.progressText) {
-      els.progressText.textContent = summaryText;
-    }
+    if (setProgressText) setProgressText(summaryText);
     if (parameters) {
       setParameters(state, parameters);
     }

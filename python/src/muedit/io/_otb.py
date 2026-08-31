@@ -66,30 +66,6 @@ def _parse_filter_string(filter_str: str, fsamp: float | None = None) -> str | f
     return "n/a"
 
 
-def _grid_map_array(description: dict[str, Any]) -> np.ndarray | None:
-    if not description or "Map" not in description:
-        return None
-    map_field = description.get("Map")
-    if isinstance(map_field, list):
-        map_field = map_field[0]
-    if not isinstance(map_field, dict):
-        return None
-    array_of_int = map_field.get("ArrayOfInt", {})
-    raw_map = (
-        array_of_int.get("int") if isinstance(array_of_int, dict) else array_of_int
-    )
-    flat = _ensure_list(raw_map)
-    try:
-        flat_int = [int(v) for v in flat]
-    except (TypeError, ValueError):
-        return None
-    n_row = int(description.get("NRow", 1))
-    n_col = int(description.get("NColumn", len(flat_int)))
-    if n_row * n_col != len(flat_int):
-        return None
-    return np.asarray(flat_int, dtype=np.int32).reshape((n_row, n_col))
-
-
 def _find_file(tmp_dir: str, name: str) -> str | None:
     for root, _, files in os.walk(tmp_dir):
         if name in files:
@@ -255,10 +231,6 @@ def _parse_otb4_novecento(tmpdir: str, track_list: list[dict[str, Any]]) -> _OTB
             payload = {
                 "data": blk_data,
                 "fs": block_fsamp,
-                "map": _grid_map_array(desc),
-                "gain": block_gain,
-                "hpf": hpf_val,
-                "lpf": lpf_val,
             }
             if title.upper().startswith("IN"):
                 emg_blocks.append((title, payload))
@@ -347,7 +319,6 @@ def _parse_otb4_generic(tmpdir: str, track_list: list[dict[str, Any]]) -> _OTB4C
         payload = {
             "data": view.copy(),
             "fs": block_fsamp,
-            "map": _grid_map_array(block.get("Description") or {}),
             "gain_val": gain,
         }
         if title.upper().startswith("IN") or grid_name.upper().startswith(("GR", "HD")):
@@ -451,11 +422,9 @@ def load_otb_plus(filepath: str) -> dict[str, Any]:
             adapters = [adapters]
 
         n_channels = 0
-        gains: list[float] = []
         adapter_filters = {}
 
         for adapter in adapters:
-            gain = float(adapter.get("@Gain", 1))
             start_index = int(adapter.get("@ChannelStartIndex", 0))
             hpf = adapter.get("@HighPassFilter", "")
             lpf = adapter.get("@LowPassFilter", "")
@@ -466,9 +435,6 @@ def load_otb_plus(filepath: str) -> dict[str, Any]:
             for ch in channels:
                 idx = int(ch.get("@Index", 0))
                 pos = start_index + idx
-                if len(gains) <= pos:
-                    gains.extend([0.0] * (pos - len(gains) + 1))
-                gains[pos] = gain
                 if filt_str:
                     adapter_filters[pos] = filt_str
                 n_channels += 1
@@ -498,8 +464,10 @@ def load_otb_plus(filepath: str) -> dict[str, Any]:
                 continue
 
             adapter_index = adapter.get("@AdapterIndex", "0")
-            hpf = float(adapter.get("@HighPassFilter", "0"))
-            lpf = float(adapter.get("@LowPassFilter", "0"))
+            hpf = _parse_filter_string(adapter.get("@HighPassFilter", "0"), sample_freq)
+            lpf = _parse_filter_string(adapter.get("@LowPassFilter", "0"), sample_freq)
+            hpf = 0.0 if hpf == "n/a" else float(hpf)
+            lpf = 0.0 if lpf == "n/a" else float(lpf)
             adapter_gain = float(adapter.get("@Gain", "1"))
 
             channels = adapter["Channel"]

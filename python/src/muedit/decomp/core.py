@@ -20,6 +20,7 @@ from muedit.decomp.algorithm import (
     whiten_extended_signal,
 )
 from muedit.decomp.types import DecomposeStepOutput, DecompositionParameters, PreprocessStepOutput
+from muedit.signal.decomp_primitives import isi_cov
 from muedit.signal.filters import demean
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ def decompose_step(
     w_sig: dict[int, np.ndarray] = {}
     win_data: dict[int, np.ndarray] = {}
     whiten_mat: dict[int, np.ndarray] = {}
+    win_means: dict[int, np.ndarray] = {}
 
     ch_idx = 0
     sil_by_window: dict[int, list[float]] = {}
@@ -72,10 +74,12 @@ def decompose_step(
             win_data_arr = grid_block[keep_idx, :]
 
             ex_factor = int(round(params.nbextchan / max(1, win_data_arr.shape[0])))
-            e_sig = demean(extend_signal(win_data_arr, ex_factor))
+            win_means[win_global] = np.mean(win_data_arr, axis=1)
+            e_sig = extend_signal(demean(win_data_arr), ex_factor)
 
             edge_samples = int(round(prep.fsamp * params.edges_sec))
-            if e_sig.shape[1] > 2 * edge_samples:
+            trim_edges = win_data_arr.shape[1] > 2 * edge_samples
+            if trim_edges:
                 e_sig = e_sig[:, edge_samples:-edge_samples]
                 coordinates_plateau[win_global * 2] += edge_samples
                 coordinates_plateau[win_global * 2 + 1] -= edge_samples
@@ -86,9 +90,7 @@ def decompose_step(
             )
             w_sig[win_global] = w_sig_win
             win_data[win_global] = (
-                win_data_arr[:, edge_samples:-edge_samples]
-                if win_data_arr.shape[1] > 2 * edge_samples
-                else win_data_arr
+                win_data_arr[:, edge_samples:-edge_samples] if trim_edges else win_data_arr
             )
             whiten_mat[win_global] = whiten_mat_win
 
@@ -111,8 +113,7 @@ def decompose_step(
                 _, spikes = get_spikes(w, x, prep.fsamp)
 
                 if len(spikes) > 10:
-                    isi = np.diff(spikes) / prep.fsamp
-                    cov_val = np.std(isi) / np.mean(isi)
+                    cov_val = isi_cov(spikes, prep.fsamp)
                     cov_scores[j] = cov_val
                     w_ini = np.sum(x[:, spikes], axis=1)
                     w_final, spikes_final, cov_final = minimize_isi_covariance(
@@ -180,4 +181,5 @@ def decompose_step(
         coordinates_plateau=coordinates_plateau,
         sil_by_window=sil_by_window,
         mu_grid_index=mu_grid_index,
+        win_means=win_means,
     )

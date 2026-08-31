@@ -5,14 +5,19 @@ from __future__ import annotations
 from typing import TypeAlias
 
 import numpy as np
-from scipy.cluster.vq import kmeans2
-from scipy.signal import find_peaks
 
 from muedit.decomp.algorithm import (
     extend_signal,
     pca_extended_signal,
     subtract_mu_waveforms,
     whiten_extended_signal,
+)
+from muedit.decomp.types import DEFAULT_NBEXTCHAN, DEFAULT_PEEL_OFF_WIN_SEC
+from muedit.signal.decomp_primitives import (
+    POSTPROC_MIN_ISI_SEC,
+    find_refractory_peaks,
+    signed_square,
+    split_by_amplitude,
 )
 from muedit.signal.filters import bandpass_signals
 
@@ -29,7 +34,7 @@ def _recompute_spikes_in_window(
     end: int,
     nbextchan: int,
     peeloff_spike_times: list[SpikeTimes] | None = None,
-    peeloff_win: float = 0.025,
+    peeloff_win: float = DEFAULT_PEEL_OFF_WIN_SEC,
     emg_offset: int = 0,
     use_peeloff: bool = False,
     artifact_times: SpikeTimes | None = None,
@@ -44,7 +49,11 @@ def _recompute_spikes_in_window(
     if win_len <= 2 * edge:
         return None, spike_times
 
-    window_emg = emg[:, start - emg_offset : end - emg_offset]
+    slice_start = start - emg_offset
+    slice_end = end - emg_offset
+    if slice_start < 0 or slice_end > emg.shape[1]:
+        return None, spike_times
+    window_emg = emg[:, slice_start:slice_end]
     window_emg = bandpass_signals(window_emg, fsamp)
 
     spikes_arr = np.asarray(spike_times, dtype=int)
@@ -85,30 +94,23 @@ def _recompute_spikes_in_window(
     pt = pt[: window_emg.shape[1]]
     pt[:edge] = 0
     pt[-edge:] = 0
-    pt = pt * np.abs(pt)
+    pt = signed_square(pt)
 
-    peaks, _ = find_peaks(pt, distance=int(round(fsamp * 0.005)))
-    if peaks.size == 0:
-        return None, spike_times
-
+    peaks = find_refractory_peaks(pt, fsamp, min_isi_sec=POSTPROC_MIN_ISI_SEC)
     if peaks.size <= 2:
         return None, spike_times
-    centroids, labels = kmeans2(pt[peaks], 2, iter=10, minit="++", missing="warn", seed=0)
+    spikes_new, centroids, labels = split_by_amplitude(pt, peaks, missing="warn")
     if len(np.unique(labels)) < 2:
         return None, spike_times
     idx2 = int(np.argmax(centroids))
-    spikes_new = peaks[labels == idx2]
-    spikes_new = spikes_new[pt[spikes_new] <= 3 * centroids[idx2]]
 
-    spikes_new = spikes_new.astype(int)
-    
     if lock_spikes and spikes1.size > 0:
         # Realign original spikes to their exact peak positions within ±10 samples
         realigned_spikes = []
         for orig_spike in spikes1:
             local_pos = int(orig_spike - start)
-            search_start = max(0, local_pos - 10)
-            search_end = min(len(pt), local_pos + 11)
+            search_start = max(edge, local_pos - 10)
+            search_end = min(len(pt) - edge, local_pos + 11)
             local_peaks_in_range = peaks[(peaks >= search_start) & (peaks < search_end)]
             if local_peaks_in_range.size > 0:
                 nearest_peak = local_peaks_in_range[np.argmin(np.abs(local_peaks_in_range - local_pos))]
@@ -118,8 +120,11 @@ def _recompute_spikes_in_window(
         # Merge realigned original spikes with newly detected spikes
         merged_spikes = sorted(set(realigned_spikes) | set(spikes_new.tolist()))
         spikes_new = np.array(merged_spikes, dtype=int)
-    
-    updated = [s for s in spike_times if s < start + edge or s > end - edge]
+
+    spikes_new = spikes_new[pt[spikes_new] <= 3 * centroids[idx2]]
+    spikes_new = spikes_new.astype(int)
+
+    updated = [s for s in spike_times if s < start + edge or s >= end - edge]
     updated.extend((spikes_new + start).tolist())
     updated = sorted({int(x) for x in updated if x >= 0})
 
@@ -133,9 +138,9 @@ def update_motor_unit_filter_window(
     fsamp: float,
     start: int,
     end: int,
-    nbextchan: int = 1000,
+    nbextchan: int = DEFAULT_NBEXTCHAN,
     peeloff_spike_times: list[SpikeTimes] | None = None,
-    peeloff_win: float = 0.025,
+    peeloff_win: float = DEFAULT_PEEL_OFF_WIN_SEC,
     emg_offset: int = 0,
     use_peeloff: bool = False,
     artifact_times: SpikeTimes | None = None,
@@ -172,8 +177,7 @@ def add_spikes_in_roi(
     temp = pulse.copy()
     mask = (np.arange(len(temp)) >= x_start) & (np.arange(len(temp)) <= x_end)
     temp[~mask] = 0
-    distance = int(round(fsamp * 0.005))
-    peaks, _ = find_peaks(temp, height=y_min, distance=distance)
+    peaks = find_refractory_peaks(temp, fsamp, min_isi_sec=POSTPROC_MIN_ISI_SEC, height=y_min)
     if peaks.size == 0:
         return sorted({int(x) for x in spike_times})
     updated = list(spike_times) + peaks.astype(int).tolist()
@@ -192,8 +196,7 @@ def add_artifact_in_roi(
     temp = pulse.copy()
     mask = (np.arange(len(temp)) >= x_start) & (np.arange(len(temp)) <= x_end)
     temp[~mask] = 0
-    distance = int(round(fsamp * 0.005))
-    peaks, _ = find_peaks(temp, height=y_min, distance=distance)
+    peaks = find_refractory_peaks(temp, fsamp, min_isi_sec=POSTPROC_MIN_ISI_SEC, height=y_min)
     if peaks.size == 0:
         return sorted({int(x) for x in artifact_times})
     updated = list(artifact_times) + peaks.astype(int).tolist()
@@ -259,17 +262,13 @@ def delete_high_discharge_rate_spikes_in_roi(
     y_min: float,
 ) -> SpikeTimes:
     """Delete one spike from high-rate pairs within an ROI."""
-    ordered = sorted(spike_times)
+    ordered = sorted({int(x) for x in spike_times})
     if len(ordered) < 2:
-        return sorted({int(x) for x in ordered})
+        return ordered
     dist = np.array(ordered, dtype=int)
     isi = np.diff(dist)
-    valid = isi > 0
-    if not np.any(valid):
-        return sorted({int(x) for x in ordered})
-    isi = isi[valid]
     dr = fsamp / isi
-    mids = dist[1:][valid] - (isi // 2)
+    mids = dist[1:] - (isi // 2)
 
     deletions = set()
     for i in range(len(dr)):
@@ -278,16 +277,14 @@ def delete_high_discharge_rate_spikes_in_roi(
             continue
         if dr[i] <= y_min:
             continue
-        left_idx = i
-        right_idx = i + 1
-        left = ordered[left_idx]
-        right = ordered[right_idx]
+        left = ordered[i]
+        right = ordered[i + 1]
         left_val = pulse[left] if 0 <= left < len(pulse) else 0
         right_val = pulse[right] if 0 <= right < len(pulse) else 0
-        deletions.add(left_idx if left_val < right_val else right_idx)
+        deletions.add(i if left_val < right_val else i + 1)
 
     updated = [t for j, t in enumerate(ordered) if j not in deletions]
-    return sorted({int(x) for x in updated})
+    return updated
 
 
 def remove_discharge_rate_outliers(
@@ -304,10 +301,7 @@ def remove_discharge_rate_outliers(
     dr = []
     for i in range(len(ordered) - 1):
         isi = ordered[i + 1] - ordered[i]
-        if isi > 0:
-            dr.append(fsamp / isi)
-    if not dr:
-        return ordered
+        dr.append(fsamp / isi)
 
     mean = float(np.mean(dr))
     std = float(np.std(dr))
@@ -316,8 +310,6 @@ def remove_discharge_rate_outliers(
     deletions = set()
     for i in range(len(ordered) - 1):
         isi = ordered[i + 1] - ordered[i]
-        if isi <= 0:
-            continue
         rate = fsamp / isi
         if rate <= threshold:
             continue

@@ -13,7 +13,7 @@ import uvicorn
 from muedit.api.app_factory import create_app
 from muedit.api.routes import include_routers
 from muedit.decomp.pipeline import run_decomposition
-from muedit.decomp.types import DecompositionParameters
+from muedit.decomp.types import DEFAULT_NBEXTCHAN, DEFAULT_PEEL_OFF_WIN_SEC, DecompositionParameters
 
 
 def _parse_roi(value: str) -> tuple[int, int]:
@@ -138,7 +138,7 @@ def run_decomposition_cli() -> None:
     parser.add_argument(
         "--peel-off-window-ms",
         type=float,
-        default=25.0,
+        default=DEFAULT_PEEL_OFF_WIN_SEC * 1000,
         help="Peel-off window in milliseconds (app setting: Window (ms)).",
     )
     parser.add_argument(
@@ -146,6 +146,12 @@ def run_decomposition_cli() -> None:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Enable/disable adaptive mode (app setting: Use adaptive).",
+    )
+    parser.add_argument(
+        "--full-trace",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply MU filters over the full EMG trace instead of only the decomposed windows.",
     )
     parser.add_argument(
         "--bids-root",
@@ -203,9 +209,7 @@ def run_decomposition_cli() -> None:
             ]
         )
         if not sample_candidates:
-            parser.error(
-                "No input filepath provided and no sample file found in data/datasamples."
-            )
+            parser.error("No input filepath provided and no sample file found in data/datasamples.")
         full_path = sample_candidates[0]
         file_label = full_path.name
 
@@ -243,7 +247,7 @@ def run_decomposition_cli() -> None:
     params = DecompositionParameters(
         niter=args.niter,
         nwindows=args.nwindows,
-        nbextchan=1000,
+        nbextchan=DEFAULT_NBEXTCHAN,
         duplicatesthresh=args.duplicatesthresh,
         sil_thr=(float("-inf") if not args.sil_filter else args.sil_thr),
         cov_thr=args.cov_thr,
@@ -253,6 +257,7 @@ def run_decomposition_cli() -> None:
         peel_off_enabled=args.peel_off,
         peel_off_win=args.peel_off_window_ms / 1000.0,
         use_adaptive=args.use_adaptive,
+        full_trace=args.full_trace,
     )
 
     run_decomposition(

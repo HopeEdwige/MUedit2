@@ -15,12 +15,9 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 from muedit.io._bids_reader import (
-    BidsGridSelection,
     _ensure_pyedflib,
     load_bids_emg_grid,
-    resolve_bids_channels_tsv,
     resolve_bids_emg_path,
-    select_grid_channels,
 )
 from muedit.signal.grid import get_grid_electrode_metadata
 
@@ -29,11 +26,8 @@ __all__ = [
     "write_bids_dataset_description",
     "export_bids_mu_derivatives",
     "build_entities",
-    "BidsGridSelection",
     "load_bids_emg_grid",
-    "resolve_bids_channels_tsv",
     "resolve_bids_emg_path",
-    "select_grid_channels",
 ]
 
 

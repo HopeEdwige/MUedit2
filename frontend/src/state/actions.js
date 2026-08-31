@@ -335,3 +335,49 @@ export function setLastRunDownloadKey(state, key) {
 export function setIsRunning(state, isRunning) {
   state.isRunning = !!isRunning;
 }
+
+export function setFsamp(state, fsamp) {
+  const n = Number(fsamp);
+  state.fsamp = Number.isFinite(n) && n > 0 ? n : null;
+}
+
+export function setRoiDraft(state, draft) {
+  state.roiDraft = draft || null;
+}
+
+export function setRoiForIndex(state, idx, roi) {
+  if (!Array.isArray(state.rois)) state.rois = [];
+  if (idx < 0) return;
+  while (state.rois.length <= idx) {
+    state.rois.push({ start: 0, end: 0 });
+  }
+  state.rois[idx] = { start: roi.start, end: roi.end };
+}
+
+export function setDiscardMaskChannel(state, gridIdx, chIdx, value) {
+  if (!Array.isArray(state.discardMasks)) state.discardMasks = [];
+  if (!Array.isArray(state.discardMasks[gridIdx])) {
+    state.discardMasks[gridIdx] = [];
+  }
+  state.discardMasks[gridIdx][chIdx] = value ? 1 : 0;
+}
+
+export function appendEditMu(state, { distimes, pulseTrain, gridIdx, uid }) {
+  state.edit.distimes.push([...(distimes || [])]);
+  state.edit.pulseTrains.push([...(pulseTrain || [])]);
+  if (!state.edit.originalDistimes) state.edit.originalDistimes = [];
+  state.edit.originalDistimes.push([...(distimes || [])]);
+  if (!state.edit.originalPulseTrains) state.edit.originalPulseTrains = [];
+  state.edit.originalPulseTrains.push([...(pulseTrain || [])]);
+  state.edit.muGridIndex.push(gridIdx);
+  if (!Array.isArray(state.edit.flagged)) state.edit.flagged = [];
+  state.edit.flagged.push(false);
+  if (!Array.isArray(state.edit.muUids)) state.edit.muUids = [];
+  state.edit.muUids.push(uid);
+  if (!state.edit.artifactTimes) state.edit.artifactTimes = [];
+  state.edit.artifactTimes.push([]);
+}
+
+export function setEditSoftwareVersions(state, versions) {
+  state.edit.softwareVersions = versions ?? null;
+}

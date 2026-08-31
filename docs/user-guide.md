@@ -98,6 +98,7 @@ automatically from the grid model name and do not need to be entered.
 | Duplicates thresh | Cross-correlation threshold for duplicate removal (0–1, default 0.3) |
 | Peeloff | Toggle peeloff; set window in ms (default 25 ms) |
 | Use adaptive | Toggle adaptive decomposition mode |
+| Full trace | Apply MU filters over the entire EMG trace instead of only the decomposed windows |
 
 **Quality Filters** (applied after decomposition)
 

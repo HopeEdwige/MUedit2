@@ -6,7 +6,15 @@
     <title>MUedit</title>
     <link rel="icon" href="data:," />
     <link rel="shortcut icon" href="data:," />
-    <link rel="stylesheet" href="style.css?v=61" />
+    <link rel="stylesheet" href="css/tokens.css?v=62" />
+    <link rel="stylesheet" href="css/base.css?v=62" />
+    <link rel="stylesheet" href="css/stages/landing.css?v=62" />
+    <link rel="stylesheet" href="css/stages/workspace.css?v=62" />
+    <link rel="stylesheet" href="css/stages/run.css?v=62" />
+    <link rel="stylesheet" href="css/stages/qc.css?v=62" />
+    <link rel="stylesheet" href="css/stages/edit.css?v=62" />
+    <link rel="stylesheet" href="css/stages/import.css?v=62" />
+    <link rel="stylesheet" href="css/responsive.css?v=62" />
   </head>
 
   <body>
@@ -14,7 +22,7 @@
       <main class="page">
         <div class="workspace-header">
           <button
-            class="settings-toggle-btn"
+            class="settings-toggle-btn icon-btn"
             id="settingsToggleBtn"
             type="button"
             aria-controls="settingsPanel"
@@ -71,7 +79,7 @@
           <div class="landing-top-row">
             <p class="headline">Select your file to get started</p>
             <button
-              class="browse-icon-btn"
+              class="browse-icon-btn icon-btn"
               id="browseSignalBtn"
               type="button"
               aria-label="Browse EMG files"
@@ -82,7 +90,6 @@
                 viewBox="0 0 24 24"
                 stroke-width="1.5"
                 stroke="currentColor"
-                class="size-6"
                 aria-hidden="true"
               >
                 <path
@@ -259,10 +266,7 @@
                     <option value="Other">Other</option>
                   </select>
                 </div>
-                <div
-                  class="form-row conditional hidden"
-                  id="bidsPlacementDescRow"
-                >
+                <div class="form-row hidden" id="bidsPlacementDescRow">
                   <label for="bidsPlacementDescription">Description</label>
                   <input
                     type="text"
@@ -291,13 +295,7 @@
                 </div>
                 <div class="form-row">
                   <label for="fsamp">Fs (Hz)</label>
-                  <input
-                    type="number"
-                    id="fsamp"
-                    value="2048"
-                    readonly
-                    class="muted"
-                  />
+                  <input type="number" id="fsamp" value="2048" readonly />
                 </div>
                 <div class="form-row">
                   <label for="bidsPowerlineFreq">Power line (Hz)</label>
@@ -372,7 +370,7 @@
                     Peeloff: Off
                   </button>
                 </div>
-                <div class="form-row conditional hidden" id="peelOffSettings">
+                <div class="form-row hidden" id="peelOffSettings">
                   <label for="peelOffWindow">Window (ms)</label>
                   <input type="number" id="peelOffWindow" value="25" min="1" />
                 </div>
@@ -385,6 +383,17 @@
                     aria-pressed="false"
                   >
                     Use adaptive: Off
+                  </button>
+                </div>
+                <div class="toggle-row">
+                  <button
+                    class="pill-toggle"
+                    id="fullTraceToggle"
+                    data-state="off"
+                    type="button"
+                    aria-pressed="false"
+                  >
+                    Full trace: Off
                   </button>
                 </div>
               </div>
@@ -438,7 +447,7 @@
                     COV tool: Off
                   </button>
                 </div>
-                <div class="form-row conditional hidden" id="covSettings">
+                <div class="form-row hidden" id="covSettings">
                   <label for="covValue">COV threshold</label>
                   <input type="number" step="0.01" id="covValue" value="0.5" />
                 </div>
@@ -466,7 +475,6 @@
                       viewBox="0 0 24 24"
                       stroke-width="1.5"
                       stroke="currentColor"
-                      class="size-6"
                       aria-hidden="true"
                     >
                       <path
@@ -525,11 +533,7 @@
                       Decompose to see results
                     </div>
                   </div>
-                  <canvas
-                    id="muPulseCanvas"
-                    height="220"
-                    class="mu-canvas"
-                  ></canvas>
+                  <canvas id="muPulseCanvas" height="220"></canvas>
                 </div>
               </div>
 
@@ -843,19 +847,11 @@
                 </div>
                 <div class="chart-card glass edit-full" id="editDrCard">
                   <div class="chart-title">Firing Rate (pps)</div>
-                  <canvas
-                    id="editDrCanvas"
-                    height="280"
-                    class="mu-canvas muted-bg"
-                  ></canvas>
+                  <canvas id="editDrCanvas" height="280"></canvas>
                 </div>
                 <div class="chart-card glass edit-full" id="editPulseCard">
                   <div class="chart-title">Pulse Train</div>
-                  <canvas
-                    id="editPulseCanvas"
-                    height="280"
-                    class="mu-canvas"
-                  ></canvas>
+                  <canvas id="editPulseCanvas" height="280"></canvas>
                 </div>
                 <canvas
                   id="editTimelineCanvas"
@@ -867,15 +863,8 @@
           </div>
         </section>
       </main>
-
-      <input
-        id="signalFileInput"
-        type="file"
-        accept=".mat,.otb+,.otb4,.npz"
-        class="hidden"
-      />
     </div>
 
-    <script type="module" src="app.js?v=61"></script>
+    <script type="module" src="app.js?v=62"></script>
   </body>
 </html>

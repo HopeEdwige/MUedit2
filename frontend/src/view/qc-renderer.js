@@ -1,4 +1,14 @@
 import { COLORS } from "../config.js";
+import { drawRoiRects } from "./plots.js";
+import { gridDimensionsFor } from "../io/grid.js";
+import { roiStart, roiEnd } from "../state/selectors.js";
+import {
+  setChannelTraces,
+  setCurrentGrid,
+  setDiscardMaskChannel,
+  setRoiDraft,
+  setRoiForIndex,
+} from "../state/actions.js";
 
 export function refreshVisuals(deps) {
   const {
@@ -63,12 +73,12 @@ export function enableRoiSelection(deps, canvasId) {
         idx = i;
       }
     });
-    state.rois[idx] = {
+    setRoiForIndex(state, idx, {
       start: startSample,
       end: Math.max(startSample + 1, endSample),
-    };
-    state.roiDraft = null;
-    state.channelTraces = [];
+    });
+    setRoiDraft(state, null);
+    setChannelTraces(state, []);
     refreshVisualsFn();
     requestQcGridWindow(
       state.currentGrid,
@@ -87,7 +97,7 @@ export function enableRoiSelection(deps, canvasId) {
     const rect = canvas.getBoundingClientRect();
     startX = e.clientX - rect.left;
     endX = startX;
-    state.roiDraft = null;
+    setRoiDraft(state, null);
   });
 
   canvas.addEventListener("mousemove", (e) => {
@@ -95,10 +105,10 @@ export function enableRoiSelection(deps, canvasId) {
     const rect = canvas.getBoundingClientRect();
     endX = e.clientX - rect.left;
     const { startSample, endSample } = toSamples(startX, endX);
-    state.roiDraft = {
+    setRoiDraft(state, {
       start: startSample,
       end: Math.max(startSample + 1, endSample),
-    };
+    });
     refreshVisualsFn();
   });
 
@@ -109,7 +119,7 @@ export function enableRoiSelection(deps, canvasId) {
     }
     dragging = false;
     if (Math.abs(endX - startX) < 4) {
-      state.roiDraft = null;
+      setRoiDraft(state, null);
       refreshVisualsFn();
       return;
     }
@@ -135,27 +145,19 @@ export function renderChannelQC(deps, waitForMiniPlots = false) {
   const allMeans = state.channelMeans || [];
   if (!allMeans[gridIdx] && allMeans.length) {
     gridIdx = 0;
-    state.currentGrid = 0;
+    setCurrentGrid(state, 0);
   }
   const means = allMeans[gridIdx];
-  if (!means) return waitForMiniPlots ? Promise.resolve() : undefined;
   const meanList = Array.isArray(means) ? means : Array.from(means || []);
-  if (!meanList.length) return waitForMiniPlots ? Promise.resolve() : undefined;
+  if (!means || !meanList.length)
+    return waitForMiniPlots ? Promise.resolve() : undefined;
   const wrap = document.createElement("div");
   wrap.className = "qc-grid";
 
   const cells = document.createElement("div");
   cells.className = "cells";
   const coords = state.coordinates?.[gridIdx] || [];
-  let maxRow = 0;
-  let maxCol = 0;
-  coords.forEach((c) => {
-    if (Array.isArray(c) && c.length >= 2) {
-      maxRow = Math.max(maxRow, c[0]);
-      maxCol = Math.max(maxCol, c[1]);
-    }
-  });
-  const cols = (maxCol || 0) + 1;
+  const { cols } = gridDimensionsFor(coords);
   cells.style.gridTemplateColumns = `repeat(${cols}, minmax(26px, 1fr))`;
 
   const mask = state.discardMasks?.[gridIdx] || [];
@@ -165,8 +167,8 @@ export function renderChannelQC(deps, waitForMiniPlots = false) {
     const roi = state.rois?.[0];
     requestQcGridWindow(
       gridIdx,
-      Number.isFinite(roi?.start) ? roi.start : 0,
-      Number.isFinite(roi?.end) ? roi.end : state.seriesLength,
+      roiStart(roi),
+      roiEnd(roi, state.seriesLength),
     );
   }
   meanList.forEach((val, chIdx) => {
@@ -191,8 +193,7 @@ export function renderChannelQC(deps, waitForMiniPlots = false) {
     const meanText = Number.isFinite(meanVal) ? meanVal.toFixed(3) : "n/a";
     cell.title = `Channel ${chIdx + 1} • mean |EMG| ${meanText}`;
     cell.addEventListener("click", () => {
-      mask[chIdx] = off ? 0 : 1;
-      state.discardMasks[gridIdx] = mask;
+      setDiscardMaskChannel(state, gridIdx, chIdx, off ? 0 : 1);
       renderChannelQC(deps, false);
     });
     miniDrawJobs.push(() =>
@@ -265,27 +266,13 @@ export function renderAuxiliaryChannels(els, state) {
   const selections = state.roiDraft
     ? [...(state.rois || []), state.roiDraft]
     : state.rois;
-  if (selections && selections.length && state.seriesLength) {
-    selections.forEach((sel) => {
-      const startX = (sel.start / state.seriesLength) * canvas.width;
-      const endX = (sel.end / state.seriesLength) * canvas.width;
-      ctx.fillStyle = COLORS.roiFill;
-      ctx.fillRect(
-        Math.min(startX, endX),
-        0,
-        Math.abs(endX - startX),
-        canvas.height,
-      );
-      ctx.strokeStyle = COLORS.roiStroke;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(
-        Math.min(startX, endX),
-        0,
-        Math.abs(endX - startX),
-        canvas.height,
-      );
-    });
-  }
+  drawRoiRects(
+    ctx,
+    selections,
+    state.seriesLength,
+    canvas.width,
+    canvas.height,
+  );
 
   let labelCount = 0;
   state.auxSeries.forEach((s, idx) => {

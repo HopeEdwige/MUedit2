@@ -1,0 +1,150 @@
+/* ── QC Tabs (grid selector) ── */
+
+.qc-tabs-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.qc-tabs-row .qc-tabs {
+  flex: 1;
+}
+
+.qc-run-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  margin-top: 0;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--mu-3);
+  border-radius: var(--radius-sm);
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-md);
+  letter-spacing: 0;
+  text-transform: none;
+  line-height: normal;
+}
+
+.qc-run-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.qc-run-btn:hover {
+  opacity: 1;
+  border-color: var(--mu-3);
+}
+
+.stage-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.tab-btn {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-md);
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.tab-btn.active {
+  border-color: var(--accent);
+  background: var(--surface-active);
+}
+
+/* ── QC Grid ── */
+
+.qc-card .qc-section {
+  display: grid;
+  gap: 14px;
+}
+
+.qc-grid {
+  display: grid;
+  gap: 6px;
+}
+
+.qc-grid .cells {
+  display: grid;
+  gap: 4px;
+}
+
+.qc-cell {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  text-align: center;
+  padding: 6px 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color 0.1s ease;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 4px;
+}
+
+.qc-cell:hover {
+  border-color: var(--accent);
+}
+
+.qc-cell.off {
+  background: var(--danger-surface);
+  border-color: var(--danger-border-clr);
+  color: var(--accent-2);
+}
+
+.qc-mini {
+  width: 100%;
+  height: 26px;
+  border-radius: 4px;
+}
+
+.qc-label {
+  font-weight: var(--fw-bold);
+}
+
+.stage-qc .split {
+  flex: 1;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
+  grid-auto-rows: minmax(0, 1fr);
+}
+
+.stage-qc .split .chart-card {
+  min-height: 0;
+}
+
+.qc-right-column {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+  height: 100%;
+}
+
+#emgCanvas,
+#auxCanvas {
+  flex: 1 1 auto;
+  min-height: clamp(var(--plot-qc-min), 22vh, var(--plot-qc-max));
+}
+
+#emgCanvas {
+  height: clamp(var(--plot-qc-min), 24vh, var(--plot-qc-max));
+}
+
+#auxCanvas {
+  height: clamp(var(--plot-qc-min), 20vh, var(--plot-qc-max));
+}

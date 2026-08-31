@@ -11,19 +11,18 @@ import {
   refreshVisuals as refreshVisualsController,
   enableRoiSelection as enableRoiSelectionController,
   renderChannelQC as renderChannelQCController,
-} from "../../view/qc_renderer.js";
+} from "../../view/qc-renderer.js";
 import {
   beginRawPreviewTransition,
   rollbackRawPreviewTransition,
 } from "../../state/transitions.js";
+import { resetBidsEntityDefaults } from "../../view/bids-renderer.js";
 
 export function createQcStageService(deps) {
   const {
     state,
     els,
-    API_BASE,
-    apiFetch,
-    apiJson,
+    api,
     drawMiniSeries,
     drawGridOverlay,
     setStatus,
@@ -42,6 +41,10 @@ export function createQcStageService(deps) {
     showWorkspace,
     nextFrame,
     updateStartAvailability,
+    resetBidsEntityDefaults: resetBidsEntityDefaultsFn,
+    applyPreviewMetadata,
+    getNwindows,
+    hideLanding,
   } = deps;
 
   function populateAuxSelector() {
@@ -59,7 +62,7 @@ export function createQcStageService(deps) {
     targetPoints = 96,
   ) {
     return requestQcGridWindowFeature(
-      { state, apiJson, apiFetch, API_BASE, renderChannelQC, setStatus },
+      { state, api, renderChannelQC, setStatus },
       gridIdx,
       start,
       end,
@@ -71,8 +74,7 @@ export function createQcStageService(deps) {
     return requestPreviewFeature(
       {
         state,
-        apiJson,
-        API_BASE,
+        api,
         setUploadLoading,
         updateProgress,
         populateAuxSelector,
@@ -88,7 +90,9 @@ export function createQcStageService(deps) {
         nextFrame,
         refreshVisuals,
         renderChannelQC,
-        els,
+        applyPreviewMetadata,
+        getNwindows,
+        hideLanding,
       },
       options,
     );
@@ -98,7 +102,7 @@ export function createQcStageService(deps) {
     return handleRawFileFeature(
       {
         state,
-        els,
+        resetBidsEntityDefaults: resetBidsEntityDefaultsFn,
         requestPreview,
         setStatus,
         updateStartAvailability,
@@ -127,15 +131,7 @@ export function createQcStageService(deps) {
   async function handleRawFilePath(path, name, options = {}) {
     const syntheticFile = { name };
     beginRawPreviewTransition(state, syntheticFile);
-    if (els.bidsSubject) els.bidsSubject.value = "1";
-    if (els.bidsSession) els.bidsSession.value = "1";
-    if (els.bidsAcquisition) els.bidsAcquisition.value = "";
-    if (els.bidsRun) els.bidsRun.value = "";
-    if (els.bidsTask) els.bidsTask.value = "trapezoid";
-    if (els.fileName) {
-      els.fileName.textContent = name;
-      els.fileName.classList.remove("loading");
-    }
+    resetBidsEntityDefaults(els, name);
     setStatus("File ready");
     updateStartAvailability();
     const ok = await requestPreview({
