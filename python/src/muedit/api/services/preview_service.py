@@ -130,7 +130,7 @@ def _build_preview_core(filepath: str) -> dict[str, Any]:
     )
 
 
-def _decomp_artifact_error(field: str, exc: Exception) -> HTTPException:
+def _decomp_artifact_error(field: str) -> HTTPException:
     return HTTPException(
         status_code=400,
         detail={
@@ -147,7 +147,7 @@ async def build_preview(file: UploadFile) -> dict[str, Any]:
         return _build_preview_core(tmp_path)
     except (OSError, ValueError) as exc:
         if "contains decomposition fields" in str(exc):
-            raise _decomp_artifact_error("file", exc) from exc
+            raise _decomp_artifact_error("file") from exc
         raise
     finally:
         safe_unlink(tmp_path)
@@ -159,7 +159,7 @@ def build_preview_from_path(filepath: str) -> dict[str, Any]:
         result = _build_preview_core(filepath)
     except (OSError, ValueError) as exc:
         if "contains decomposition fields" in str(exc):
-            raise _decomp_artifact_error("path", exc) from exc
+            raise _decomp_artifact_error("path") from exc
         raise
 
     # Best-effort: enrich with participant and hardware info from BIDS sidecars.

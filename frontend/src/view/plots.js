@@ -6,7 +6,7 @@
  */
 import { COLORS } from "../config.js";
 
-export function getAxisPadding(showAxes) {
+function getAxisPadding(showAxes) {
   return showAxes
     ? { left: 38, right: 8, top: 8, bottom: 20 }
     : { left: 0, right: 0, top: 0, bottom: 0 };
@@ -31,6 +31,34 @@ export function getCanvasPlotMetrics(
     plotWidth: Math.max(1, width - padding.left - padding.right),
     plotHeight: Math.max(1, height - padding.top - padding.bottom),
   };
+}
+
+function drawSelectionRect(ctx, startX, endX, sel, padding, plotHeight) {
+  const hasY = Number.isFinite(sel?.yMin) && Number.isFinite(sel?.yMax);
+  const yMin = hasY ? Math.max(0, Math.min(plotHeight, sel.yMin)) : 0;
+  const yMax = hasY ? Math.max(0, Math.min(plotHeight, sel.yMax)) : plotHeight;
+  const rectTop = padding.top + Math.min(yMin, yMax);
+  const rectHeight = Math.max(1, Math.abs(yMax - yMin));
+  const x = Math.min(startX, endX);
+  const width = Math.max(1, Math.abs(endX - startX));
+  ctx.fillStyle = COLORS.selectionFill;
+  ctx.fillRect(x, rectTop, width, rectHeight);
+  ctx.strokeStyle = COLORS.selectionStroke;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, rectTop, width, rectHeight);
+}
+
+export function drawRoiRects(ctx, selections, totalSamples, width, height) {
+  if (!selections || !selections.length || !totalSamples) return;
+  selections.forEach((sel) => {
+    const startX = (sel.start / totalSamples) * width;
+    const endX = (sel.end / totalSamples) * width;
+    ctx.fillStyle = COLORS.roiFill;
+    ctx.fillRect(Math.min(startX, endX), 0, Math.abs(endX - startX), height);
+    ctx.strokeStyle = COLORS.roiStroke;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(Math.min(startX, endX), 0, Math.abs(endX - startX), height);
+  });
 }
 
 export function drawSeries(
@@ -69,15 +97,10 @@ export function drawSeries(
   const hideYAxis = !!options.hideYAxis;
   const fsamp = options.fsamp || null;
   const markerColor = options.markerColor || COLORS.secondary;
-  const padding = showAxes
-    ? hideYAxis
-      ? { left: 8, right: 8, top: 8, bottom: 20 }
-      : getAxisPadding(true)
-    : getAxisPadding(false);
-  const plotWidth = Math.max(1, canvasEl.width - padding.left - padding.right);
-  const plotHeight = Math.max(
-    1,
-    canvasEl.height - padding.top - padding.bottom,
+  const { padding, plotWidth, plotHeight } = getCanvasPlotMetrics(
+    canvasEl,
+    showAxes,
+    { hideYAxis },
   );
 
   const startIdx = viewRange?.start ?? 0;
@@ -112,19 +135,7 @@ export function drawSeries(
       const e = Math.max(s + 1, Math.min(clampedEnd, rawEnd));
       const startX = padding.left + ((s - clampedStart) / viewSpan) * plotWidth;
       const endX = padding.left + ((e - clampedStart) / viewSpan) * plotWidth;
-      const width = Math.max(1, endX - startX);
-      const hasY = Number.isFinite(sel?.yMin) && Number.isFinite(sel?.yMax);
-      const yMin = hasY ? Math.max(0, Math.min(plotHeight, sel.yMin)) : 0;
-      const yMax = hasY
-        ? Math.max(0, Math.min(plotHeight, sel.yMax))
-        : plotHeight;
-      const rectTop = padding.top + Math.min(yMin, yMax);
-      const rectHeight = Math.max(1, Math.abs(yMax - yMin));
-      ctx.fillStyle = COLORS.selectionFill;
-      ctx.fillRect(startX, rectTop, width, rectHeight);
-      ctx.strokeStyle = COLORS.selectionStroke;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(startX, rectTop, width, rectHeight);
+      drawSelectionRect(ctx, startX, endX, sel, padding, plotHeight);
     });
   }
 
@@ -249,28 +260,7 @@ export function drawSeries(
     selections.forEach((sel) => {
       const startX = padding.left + (sel.start / totalSamples) * plotWidth;
       const endX = padding.left + (sel.end / totalSamples) * plotWidth;
-      const hasY = Number.isFinite(sel?.yMin) && Number.isFinite(sel?.yMax);
-      const yMin = hasY ? Math.max(0, Math.min(plotHeight, sel.yMin)) : 0;
-      const yMax = hasY
-        ? Math.max(0, Math.min(plotHeight, sel.yMax))
-        : plotHeight;
-      const rectTop = padding.top + Math.min(yMin, yMax);
-      const rectHeight = Math.max(1, Math.abs(yMax - yMin));
-      ctx.fillStyle = COLORS.selectionFill;
-      ctx.fillRect(
-        Math.min(startX, endX),
-        rectTop,
-        Math.abs(endX - startX),
-        rectHeight,
-      );
-      ctx.strokeStyle = COLORS.selectionStroke;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(
-        Math.min(startX, endX),
-        rectTop,
-        Math.abs(endX - startX),
-        rectHeight,
-      );
+      drawSelectionRect(ctx, startX, endX, sel, padding, plotHeight);
     });
   }
 }
@@ -321,25 +311,13 @@ export function drawGridOverlay(
   const span = globalMax - globalMin || 1;
 
   if (selections && selections.length && totalSamples) {
-    selections.forEach((sel) => {
-      const startX = (sel.start / totalSamples) * canvasEl.width;
-      const endX = (sel.end / totalSamples) * canvasEl.width;
-      ctx.fillStyle = COLORS.roiFill;
-      ctx.fillRect(
-        Math.min(startX, endX),
-        0,
-        Math.abs(endX - startX),
-        canvasEl.height,
-      );
-      ctx.strokeStyle = COLORS.roiStroke;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(
-        Math.min(startX, endX),
-        0,
-        Math.abs(endX - startX),
-        canvasEl.height,
-      );
-    });
+    drawRoiRects(
+      ctx,
+      selections,
+      totalSamples,
+      canvasEl.width,
+      canvasEl.height,
+    );
   }
 
   validSeries.forEach((arr, idx) => {

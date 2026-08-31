@@ -69,6 +69,7 @@ export const state = {
   runView: null,
   muSelectionRange: null,
   roiDraft: null,
+  fsamp: null,
   auxSeries: [],
   auxNames: [],
   edit: createEditSlice(),

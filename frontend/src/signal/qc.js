@@ -5,6 +5,7 @@ import {
   setChannelTraces,
   setCoordinates,
   setCurrentStage,
+  setFsamp,
   setGridNames,
   setGridSeries,
   setMetadata,
@@ -20,6 +21,17 @@ import {
   beginRawPreviewTransition,
   rollbackRawPreviewTransition,
 } from "../state/transitions.js";
+import { roiStart, roiEnd } from "../state/selectors.js";
+
+function channelsToEnv(channels) {
+  return (Array.isArray(channels) ? channels : [])
+    .sort((a, b) => (a.channel_index ?? 0) - (b.channel_index ?? 0))
+    .map((c) =>
+      Array.isArray(c.series)
+        ? c.series
+        : { min: c.min || [], max: c.max || [] },
+    );
+}
 
 export function syncRois(state, nwin) {
   if (!state.rois) state.rois = [];
@@ -36,8 +48,7 @@ export async function requestQcGridWindow(
   end,
   targetPoints = 96,
 ) {
-  const { state, apiJson, apiFetch, API_BASE, renderChannelQC, setStatus } =
-    deps;
+  const { state, api, renderChannelQC, setStatus } = deps;
   const s = Number.isFinite(start) ? start : 0;
   const e = Number.isFinite(end) ? end : state.seriesLength;
 
@@ -56,61 +67,11 @@ export async function requestQcGridWindow(
       target_points: targetPoints,
     };
 
-    let env = [];
-    // Raw mode prefers binary transport for lower payload size; fall back to JSON decoding
-    // when the backend responds in JSON (or when callers choose JSON mode).
-    if (
+    const preferBinary =
       (state.qcRepresentation || "raw") === "raw" &&
-      typeof apiFetch === "function"
-    ) {
-      const res = await apiFetch(
-        `${API_BASE}/qc/window`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/octet-stream",
-          },
-          body: JSON.stringify(requestPayload),
-        },
-        120000,
-      );
-      const payload = await res.arrayBuffer();
-      if (isQcRawF32Payload(payload, res.headers.get("x-muedit-format"))) {
-        const decoded = decodeQcRawF32(payload);
-        env = decoded.channels
-          .sort((a, b) => (a.channel_index ?? 0) - (b.channel_index ?? 0))
-          .map((c) => c.series || []);
-      } else {
-        const data = decodeQcJsonPayload(payload);
-        const channels = Array.isArray(data.channels) ? data.channels : [];
-        env = channels
-          .sort((a, b) => (a.channel_index ?? 0) - (b.channel_index ?? 0))
-          .map((c) =>
-            Array.isArray(c.series)
-              ? c.series
-              : { min: c.min || [], max: c.max || [] },
-          );
-      }
-    } else {
-      const data = await apiJson(
-        `${API_BASE}/qc/window`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(requestPayload),
-        },
-        120000,
-      );
-      const channels = Array.isArray(data.channels) ? data.channels : [];
-      env = channels
-        .sort((a, b) => (a.channel_index ?? 0) - (b.channel_index ?? 0))
-        .map((c) =>
-          Array.isArray(c.series)
-            ? c.series
-            : { min: c.min || [], max: c.max || [] },
-        );
-    }
+      typeof api?.fetchQcWindow === "function";
+    const data = await api.fetchQcWindow(requestPayload, { preferBinary });
+    const env = channelsToEnv(data.channels);
     setChannelTraceForGrid(state, gridIdx, env);
     if (gridIdx === state.currentGrid) {
       renderChannelQC();
@@ -125,76 +86,11 @@ export async function requestQcGridWindow(
   }
 }
 
-function isQcRawF32Payload(buffer, formatHeader = "") {
-  if (formatHeader === "qc-raw-f32-v1") return true;
-  if (!buffer || buffer.byteLength < 4) return false;
-  const sig = new Uint8Array(buffer, 0, 4);
-  return sig[0] === 77 && sig[1] === 81 && sig[2] === 67 && sig[3] === 82; // "MQCR"
-}
-
-function decodeQcJsonPayload(buffer) {
-  const text = new TextDecoder().decode(new Uint8Array(buffer));
-  return JSON.parse(text);
-}
-
-function decodeQcRawF32(buffer) {
-  // Wire format:
-  // 4 bytes magic "MQCR" + uint32 version + fixed metadata fields + repeated channel blocks.
-  // Each channel block is: int32 channel_index, uint32 n, float32[n] samples.
-  const view = new DataView(buffer);
-  const decodeText = (offset, len) =>
-    String.fromCharCode(...new Uint8Array(buffer.slice(offset, offset + len)));
-  if (decodeText(0, 4) !== "MQCR") {
-    throw new Error("Invalid QC raw payload");
-  }
-  let offset = 4;
-  const version = view.getUint32(offset, true);
-  offset += 4;
-  if (version !== 1) {
-    throw new Error(`Unsupported QC raw payload version: ${version}`);
-  }
-  const grid_index = view.getInt32(offset, true);
-  offset += 4;
-  const channel_index = view.getInt32(offset, true);
-  offset += 4;
-  const start = view.getInt32(offset, true);
-  offset += 4;
-  const end = view.getInt32(offset, true);
-  offset += 4;
-  const total_samples = view.getInt32(offset, true);
-  offset += 4;
-  const fsamp = view.getFloat32(offset, true);
-  offset += 4;
-  const nChannels = view.getUint32(offset, true);
-  offset += 4;
-
-  const channels = [];
-  for (let i = 0; i < nChannels; i++) {
-    const chIdx = view.getInt32(offset, true);
-    offset += 4;
-    const n = view.getUint32(offset, true);
-    offset += 4;
-    const series = new Float32Array(buffer, offset, n);
-    offset += n * 4;
-    channels.push({ channel_index: chIdx, series: Array.from(series) });
-  }
-  return {
-    grid_index,
-    channel_index,
-    start,
-    end,
-    total_samples,
-    fsamp,
-    channels,
-  };
-}
-
 export async function requestPreview(deps, options = {}) {
   const { silentFailure = false, filepath = null } = options;
   const {
     state,
-    apiJson,
-    API_BASE,
+    api,
     setUploadLoading,
     updateProgress,
     populateAuxSelector,
@@ -210,7 +106,9 @@ export async function requestPreview(deps, options = {}) {
     nextFrame,
     refreshVisuals,
     renderChannelQC,
-    els,
+    applyPreviewMetadata,
+    getNwindows,
+    hideLanding,
   } = deps;
 
   if (!state.file && !filepath) return;
@@ -220,23 +118,11 @@ export async function requestPreview(deps, options = {}) {
   try {
     let data;
     if (filepath) {
-      data = await apiJson(
-        `${API_BASE}/preview-by-path`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: filepath }),
-        },
-        120000,
-      );
+      data = await api.fetchPreviewByPath(filepath);
     } else {
       const formData = new FormData();
       formData.append("file", state.file);
-      data = await apiJson(
-        `${API_BASE}/preview`,
-        { method: "POST", body: formData },
-        120000,
-      );
+      data = await api.fetchPreview(formData);
     }
     setUploadToken(state, data.upload_token || null);
     setGridSeries(state, data.grid_mean_abs || []);
@@ -249,16 +135,13 @@ export async function requestPreview(deps, options = {}) {
     setMetadata(state, data.metadata || {});
     setMuscle(state, data.muscle || []);
     setAuxData(state, data.auxiliary || [], data.auxiliary_names || []);
-    if (els.fsamp) {
-      const fs = Number(data.fsamp);
-      els.fsamp.value =
-        Number.isFinite(fs) && fs > 0 ? String(Math.round(fs)) : "";
-    }
+    setFsamp(state, data.fsamp);
+    if (applyPreviewMetadata) applyPreviewMetadata(data);
     setPreviewSeries(state, data.mean_abs || []);
     populateAuxSelector();
     ensureDiscardMasks();
     populateGridTabs();
-    const nwin = Number(els.nwindows?.value) || 1;
+    const nwin = getNwindows ? getNwindows() : 1;
     const defaultEnd = state.seriesLength || 0;
     const rois = [];
     for (let i = 0; i < nwin; i++) {
@@ -268,8 +151,8 @@ export async function requestPreview(deps, options = {}) {
     const roiPreview = state.rois?.[0];
     await requestQcGridWindow(
       getCurrentGrid(),
-      Number.isFinite(roiPreview?.start) ? roiPreview.start : 0,
-      Number.isFinite(roiPreview?.end) ? roiPreview.end : state.seriesLength,
+      roiStart(roiPreview),
+      roiEnd(roiPreview, state.seriesLength),
     );
     enableRoiSelection("emgCanvas");
     enableRoiSelection("auxCanvas");
@@ -279,26 +162,13 @@ export async function requestPreview(deps, options = {}) {
     renderBidsAutoInfo();
     renderBidsMuscleFields();
 
-    // Populate participant and hardware fields from BIDS sidecars when available.
-    const participant = data?.participant_meta || {};
-    const naToEmpty = (v) => (!v || v === "n/a" ? "" : v);
-    if (els.bidsParticipantAge && participant.age != null)
-      els.bidsParticipantAge.value = naToEmpty(participant.age);
-    if (els.bidsParticipantSex && participant.sex != null)
-      els.bidsParticipantSex.value = naToEmpty(participant.sex);
-    if (els.bidsParticipantHandedness && participant.handedness != null)
-      els.bidsParticipantHandedness.value = naToEmpty(participant.handedness);
-    if (els.bidsManufacturer && data?.manufacturer)
-      els.bidsManufacturer.value = data.manufacturer;
-    if (els.bidsDeviceModel && data?.manufacturers_model_name)
-      els.bidsDeviceModel.value = data.manufacturers_model_name;
     updateProgress(0, "Preview ready - drag to select ROI");
     setStatus("Preview ready", "success");
     showWorkspace({ keepLandingVisible: true });
     await nextFrame();
     refreshVisuals();
     await renderChannelQC(true);
-    if (els.landing) els.landing.classList.add("hidden");
+    if (hideLanding) hideLanding();
     return true;
   } catch (err) {
     console.error(err);
@@ -315,20 +185,17 @@ export async function requestPreview(deps, options = {}) {
 
 export async function handleRawFile(deps, file, options = {}) {
   const { silentPreviewFailure = false } = options;
-  const { state, els, requestPreview, setStatus, updateStartAvailability } =
-    deps;
+  const {
+    state,
+    resetBidsEntityDefaults,
+    requestPreview,
+    setStatus,
+    updateStartAvailability,
+  } = deps;
 
   if (!file) return;
   beginRawPreviewTransition(state, file);
-  if (els.bidsSubject) els.bidsSubject.value = "1";
-  if (els.bidsSession) els.bidsSession.value = "1";
-  if (els.bidsAcquisition) els.bidsAcquisition.value = "";
-  if (els.bidsRun) els.bidsRun.value = "";
-  if (els.bidsTask) els.bidsTask.value = "trapezoid";
-  if (els.fileName) {
-    els.fileName.textContent = file.name;
-    els.fileName.classList.remove("loading");
-  }
+  resetBidsEntityDefaults(file.name);
   setStatus("File ready");
   updateStartAvailability();
   const ok = await requestPreview({ silentFailure: silentPreviewFailure });

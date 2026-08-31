@@ -1,6 +1,6 @@
 import { inferGridCount, normalizeGridNames } from "./grid.js";
 
-export function safeBidsToken(value, fallback = "") {
+function safeBidsToken(value, fallback = "") {
   const token = String(value || "")
     .trim()
     .replace(/[^A-Za-z0-9]+/g, "");
@@ -13,10 +13,9 @@ export function buildEntityLabelFromSession({
   session,
   run,
   acq,
-  recording,
 } = {}) {
-  // Emit entities in canonical BIDS order: sub, ses, task, acq, run, recording.
-  // run/acq/recording are added only when provided so sequential recordings
+  // Emit entities in canonical BIDS order: sub, ses, task, acq, run.
+  // run/acq are added only when provided so sequential recordings
   // keyed by acq-<label> are not stamped with a spurious run-01.
   const parts = [`sub-${safeBidsToken(subject, "01")}`];
   const ses = safeBidsToken(session, "");
@@ -26,8 +25,6 @@ export function buildEntityLabelFromSession({
   if (a) parts.push(`acq-${a}`);
   const r = safeBidsToken(run, "");
   if (r) parts.push(`run-${r}`);
-  const rec = safeBidsToken(recording, "");
-  if (rec) parts.push(`recording-${rec}`);
   return parts.join("_");
 }
 
@@ -49,7 +46,6 @@ export function parseBidsEntitiesFromLabel(label) {
     task: get("task"),
     acq: get("acq"),
     run: get("run"),
-    recording: get("recording"),
   };
 }
 
@@ -99,15 +95,16 @@ export function buildBidsMuscleRowsModel(state) {
     Array.isArray(state.gridNames) && state.gridNames.length
       ? state.gridNames
       : [];
-  const gridNames = inEditStage
-    ? editGridNames.length
-      ? editGridNames
-      : ["Grid 1"]
-    : editGridNames.length
-      ? editGridNames
-      : runGridNames.length
-        ? runGridNames
-        : ["Grid 1"];
+
+  let gridNames;
+  if (inEditStage) {
+    gridNames = editGridNames.length ? editGridNames : ["Grid 1"];
+  } else if (editGridNames.length) {
+    gridNames = editGridNames;
+  } else {
+    gridNames = runGridNames.length ? runGridNames : ["Grid 1"];
+  }
+
   const muscles = Array.isArray(state.muscle) ? state.muscle : [];
   const rowCount = inferGridCount({
     gridNames,
@@ -124,6 +121,10 @@ export function buildBidsMuscleRowsModel(state) {
   }));
 }
 
+export function naToEmpty(v) {
+  return !v || v === "n/a" ? "" : v;
+}
+
 export function buildSessionInfoFromDecomposition(file, data, deps) {
   const { parseBidsEntitiesFromLabel, listifyMuscles } = deps;
   const fileLabel = file?.name || data?.file_label || "decomposition";
@@ -137,7 +138,6 @@ export function buildSessionInfoFromDecomposition(file, data, deps) {
     : listifyMuscles(fromParams);
 
   const participant = data?.participant_meta || {};
-  const naToEmpty = (v) => (!v || v === "n/a" ? "" : v);
 
   return {
     fileLabel,

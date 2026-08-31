@@ -57,8 +57,6 @@ def run_decomposition(
         prep=preprocessed,
         decomposed=decomposed,
         params=params,
-        bids_root=bids_root,
-        bids_entities=bids_entities,
         progress_cb=progress_cb,
     )
     return export_step(

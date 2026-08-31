@@ -25,6 +25,16 @@ def _ensure_pyedflib() -> Any:
     return pyedflib
 
 
+def _parse_tsv_number(value: str | None) -> float | str:
+    """Convert a channels.tsv cell to float, preserving ``"n/a"`` placeholders."""
+    if value is None or value == "" or str(value).strip().lower() == "n/a":
+        return "n/a"
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 
 @dataclass
 class BidsGridSelection:
@@ -158,10 +168,10 @@ def load_bids_signal(filepath: str) -> dict[str, Any]:
         with json_path.open("r", encoding="utf-8") as f:
             emg_json = json.load(f)
         fsamp = float(emg_json.get("SamplingFrequency", 0.0))
-        device_name = emg_json.get("RecordingDevice")
+        device_name = emg_json.get("ManufacturersModelName")
         hw = emg_json.get("HardwareFilters")
         if hw:
-            hardware_filters = [str(hw)]
+            hardware_filters = hw
         bids_sidecar = emg_json
         electrode_model_name = emg_json.get("ElectrodeManufacturersModelName")
 
@@ -169,6 +179,9 @@ def load_bids_signal(filepath: str) -> dict[str, Any]:
     grid_order: list[str] = []
     aux_channel_indices: list[int] = []
     aux_names: list[str] = []
+    aux_low_cutoff: list[str] = []
+    aux_high_cutoff: list[str] = []
+    aux_gain: list[str] = []
 
     with channels_tsv.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter="\t")
@@ -194,14 +207,23 @@ def load_bids_signal(filepath: str) -> dict[str, Any]:
                         "target_muscle": row.get("target_muscle", ""),
                         "channel_indices": [],
                         "bad_mask": [],
+                        "low_cutoff": [],
+                        "high_cutoff": [],
+                        "gain": [],
                     }
                     grid_order.append(group)
                 grid_meta[group]["channel_indices"].append(idx)
                 status = (row.get("status") or "").lower()
                 grid_meta[group]["bad_mask"].append(1 if status == "bad" else 0)
+                grid_meta[group]["low_cutoff"].append(row.get("low_cutoff") or "n/a")
+                grid_meta[group]["high_cutoff"].append(row.get("high_cutoff") or "n/a")
+                grid_meta[group]["gain"].append(row.get("gain") or "n/a")
             else:
                 aux_channel_indices.append(idx)
                 aux_names.append(row.get("name") or f"Ch{idx:02d}")
+                aux_low_cutoff.append(row.get("low_cutoff") or "n/a")
+                aux_high_cutoff.append(row.get("high_cutoff") or "n/a")
+                aux_gain.append(row.get("gain") or "n/a")
 
     if not grid_order:
         raise ValueError(f"No EMG grid channels found in {channels_tsv}")
@@ -230,6 +252,9 @@ def load_bids_signal(filepath: str) -> dict[str, Any]:
     grid_muscles: list[str] = []
     grid_bad_masks: list[list[int]] = []
     grid_segments: list[np.ndarray] = []
+    emg_hpf: list[float | str] = []
+    emg_lpf: list[float | str] = []
+    gains: list[float | str] = []
 
     for g in grid_order:
         meta = grid_meta[g]
@@ -238,6 +263,9 @@ def load_bids_signal(filepath: str) -> dict[str, Any]:
         muscle = meta["target_muscle"]
         grid_muscles.append("" if (not muscle or muscle == "n/a") else muscle)
         grid_bad_masks.append(meta["bad_mask"])
+        emg_hpf.extend(meta["low_cutoff"])
+        emg_lpf.extend(meta["high_cutoff"])
+        gains.extend(meta["gain"])
 
     data = np.vstack(grid_segments) if grid_segments else np.zeros((0, n_samples), dtype=float)
 
@@ -259,6 +287,14 @@ def load_bids_signal(filepath: str) -> dict[str, Any]:
         "bad_channels_per_grid": grid_bad_masks,
         "bids_entity_label": entity_label,
         "bids_emg_path": str(emg_path),
+        # Per-channel amplifier metadata read back from channels.tsv so the
+        # BIDS round-trip (export → re-import → re-export) preserves them.
+        "gains": [_parse_tsv_number(v) for v in gains],
+        "emg_hpf": [_parse_tsv_number(v) for v in emg_hpf],
+        "emg_lpf": [_parse_tsv_number(v) for v in emg_lpf],
+        "aux_gains": [_parse_tsv_number(v) for v in aux_gain],
+        "aux_hpf": [_parse_tsv_number(v) for v in aux_low_cutoff],
+        "aux_lpf": [_parse_tsv_number(v) for v in aux_high_cutoff],
         # Round-trip fields — all keys that export_bids_emg can write
         "software_versions": bids_sidecar.get("SoftwareVersions"),
         "recording_type": bids_sidecar.get("RecordingType"),

@@ -1,0 +1,246 @@
+/* ── Edit Stage ── */
+
+.edit-top-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+  margin-bottom: 0;
+}
+
+.edit-full {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.stage-edit .chart-card {
+  padding: 4px 12px 12px 12px;
+}
+
+.edit-controls-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.edit-controls-row .mu-controls {
+  margin-bottom: 0;
+}
+
+.edit-selects {
+  align-items: center;
+}
+
+.edit-selects select {
+  height: 40px;
+  padding: 0 12px;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-bold);
+  line-height: 1;
+}
+
+#editMuSelect {
+  min-width: 110px;
+  width: 110px;
+}
+
+.edit-toolbar {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  margin-top: 6px;
+  overflow-x: auto;
+  flex: 1;
+}
+
+.edit-toolbar-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.edit-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 8px;
+  margin-right: 2px;
+  border-right: 1px solid var(--border);
+}
+
+.edit-toolbar-group:last-child {
+  border-right: none;
+  padding-right: 0;
+  margin-right: 0;
+}
+
+.edit-toolbar-group-save {
+  border-right: none;
+}
+
+.edit-toolbar-row .pill-toggle {
+  width: auto;
+  flex: 0 0 auto;
+  height: 40px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-bold);
+  line-height: 1;
+}
+
+.edit-toolbar-row .start-btn {
+  width: auto;
+  margin-top: 0;
+  flex: 0 0 auto;
+  height: 40px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-bold);
+  line-height: 1;
+}
+
+.edit-toolbar-row .pill-toggle svg,
+.edit-toolbar-row .start-btn svg {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+}
+
+.edit-toolbar-row .pill-toggle span,
+.edit-toolbar-row .start-btn span {
+  display: inline-block;
+}
+
+.edit-toolbar-row .icon-expand-btn {
+  max-width: 44px;
+  padding: 0 12px;
+  gap: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition:
+    max-width 0.2s ease,
+    gap 0.2s ease,
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.edit-toolbar-row .icon-expand-btn span {
+  max-width: 0;
+  opacity: 0;
+  margin-left: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition:
+    max-width 0.2s ease,
+    opacity 0.15s ease,
+    margin-left 0.2s ease;
+}
+
+.edit-toolbar-row .icon-expand-btn:hover,
+.edit-toolbar-row .icon-expand-btn:focus-visible,
+.edit-toolbar-row .icon-expand-btn.is-running {
+  max-width: 220px;
+  gap: 8px;
+  color: var(--mu-4);
+  border-color: var(--mu-4);
+  background: var(--mu-4-dim);
+}
+
+.edit-toolbar-row .icon-expand-btn:hover span,
+.edit-toolbar-row .icon-expand-btn:focus-visible span,
+.edit-toolbar-row .icon-expand-btn.is-running span {
+  max-width: 200px;
+  opacity: 1;
+  margin-left: 0;
+}
+
+#editPeelOffToggle,
+#editLockSpikesToggle {
+  max-width: 140px;
+}
+
+.edit-toolbar-row .icon-expand-btn .peeloff-short,
+.edit-toolbar-row .icon-expand-btn .lockspikes-short {
+  max-width: 50px;
+  opacity: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  transition:
+    max-width 0.2s ease,
+    opacity 0.15s ease;
+}
+.edit-toolbar-row .icon-expand-btn:hover .peeloff-short,
+.edit-toolbar-row .icon-expand-btn:hover .lockspikes-short,
+.edit-toolbar-row .icon-expand-btn:focus-visible .peeloff-short,
+.edit-toolbar-row .icon-expand-btn:focus-visible .lockspikes-short {
+  max-width: 0;
+  opacity: 0;
+}
+.edit-toolbar-row .icon-expand-btn .peeloff-full,
+.edit-toolbar-row .icon-expand-btn .lockspikes-full {
+  max-width: 0;
+  opacity: 0;
+}
+.edit-toolbar-row .icon-expand-btn:hover .peeloff-full,
+.edit-toolbar-row .icon-expand-btn:hover .lockspikes-full,
+.edit-toolbar-row .icon-expand-btn:focus-visible .peeloff-full,
+.edit-toolbar-row .icon-expand-btn:focus-visible .lockspikes-full {
+  max-width: 140px;
+  opacity: 1;
+}
+
+#editSaveBtn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--mu-4);
+}
+
+.stage-edit {
+  flex: 1;
+  min-height: 0;
+}
+
+.stage-edit .edit-top-row {
+  margin-bottom: 0;
+}
+
+.stage-edit .edit-full {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#editDrCard {
+  flex-grow: 1;
+}
+
+#editPulseCard {
+  flex-grow: 2;
+}
+
+#editDrCanvas,
+#editPulseCanvas {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.edit-timeline-canvas {
+  width: 100%;
+  height: 20px;
+  flex: 0 0 20px;
+  display: block;
+  cursor: grab;
+  border-radius: 3px;
+}
+
+.edit-timeline-canvas:active {
+  cursor: grabbing;
+}

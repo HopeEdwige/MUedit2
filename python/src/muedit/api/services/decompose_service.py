@@ -21,7 +21,6 @@ from muedit.api.cache import (
 from muedit.api.common import (
     _pack_json_f32_payload,
     build_params,
-    json_default,
     make_json_safe,
     parse_discard_channels,
     parse_json_object,
@@ -118,19 +117,21 @@ def decomposition_event_stream(
 ) -> Iterator[str]:
     """Yield NDJSON progress events while decomposition executes in background thread."""
     q: queue.Queue[dict[str, Any] | None] = queue.Queue()
-    terminal_emitted = False
 
     def progress(stage: str, payload: dict[str, Any]) -> None:
-        """Normalize and queue progress callback payload from pipeline."""
-        nonlocal terminal_emitted
+        """Normalize and queue progress callback payload from the pipeline."""
+        if stage == "done":
+            # The pipeline emits its own "done" via progress_cb, but the worker
+            # emits the real terminal event (with the binary preview token).
+            # Swallow the pipeline's "done" here to avoid a duplicate terminal.
+            return
         event = {"stage": stage}
         event.update({k: make_json_safe(v) for k, v in payload.items()})
-        if stage in {"done", "error"}:
-            terminal_emitted = True
         q.put(event)
 
     def worker() -> None:
         """Execute decomposition and push terminal success/error events."""
+        emitted = False
         try:
             param_obj = build_params(params_raw)
             result, save_path = run_decomposition(
@@ -138,7 +139,7 @@ def decomposition_event_stream(
                 duration=duration,
                 manual_roi=False,
                 params=param_obj,
-                save_npz=persist_output,
+                save_npz=persist_output or bids_root is not None,
                 progress_cb=progress,
                 roi=roi,
                 rois=rois,
@@ -150,26 +151,26 @@ def decomposition_event_stream(
                 include_full_preview=include_full_preview,
                 preloaded_signal=preloaded_signal,
             )
-            if not terminal_emitted:
-                preview_payload = make_json_safe(result.get("preview", {}))
-                if binary_preview:
-                    bin_payload = _encode_decompose_preview_f32(preview_payload)
-                    preview_token = _store_decomp_preview_binary(bin_payload)
-                    preview_payload = dict(preview_payload)
-                    preview_payload.pop("pulse_trains_full", None)
-                    preview_payload.pop("pulse_trains_all", None)
-                    preview_payload["preview_binary_token"] = preview_token
-                q.put(
-                    {
-                        "stage": "done",
-                        "summary": make_json_safe(
-                            summarize_result(result, save_path, persist_output)
-                        ),
-                        "preview": preview_payload,
-                        "pct": 100,
-                        "message": "Complete",
-                    }
-                )
+            preview_payload = make_json_safe(result.get("preview", {}))
+            if binary_preview:
+                bin_payload = _encode_decompose_preview_f32(preview_payload)
+                preview_token = _store_decomp_preview_binary(bin_payload)
+                preview_payload = dict(preview_payload)
+                preview_payload.pop("pulse_trains_full", None)
+                preview_payload.pop("pulse_trains_all", None)
+                preview_payload["preview_binary_token"] = preview_token
+            q.put(
+                {
+                    "stage": "done",
+                    "summary": make_json_safe(
+                        summarize_result(result, save_path, persist_output)
+                    ),
+                    "preview": preview_payload,
+                    "pct": 100,
+                    "message": "Complete",
+                }
+            )
+            emitted = True
         except Exception as exc:  # noqa: BLE001
             q.put(
                 {
@@ -180,7 +181,16 @@ def decomposition_event_stream(
                     "traceback": traceback.format_exc(),
                 }
             )
+            emitted = True
         finally:
+            if not emitted:
+                q.put(
+                    {
+                        "stage": "error",
+                        "pct": 100,
+                        "message": "Decomposition worker terminated unexpectedly",
+                    }
+                )
             if tmp_path and cleanup:
                 cleanup(tmp_path)
             q.put(None)
@@ -193,7 +203,7 @@ def decomposition_event_stream(
         if event is None:
             break
         safe_event = make_json_safe(event)
-        yield json.dumps(safe_event, default=json_default) + "\n"
+        yield json.dumps(safe_event) + "\n"
 
 
 async def resolve_decompose_input(
@@ -249,5 +259,3 @@ def parse_stream_options(
         parse_json_object(bids_entities, "bids_entities"),
         parse_json_object(bids_metadata, "bids_metadata"),
     )
-
-

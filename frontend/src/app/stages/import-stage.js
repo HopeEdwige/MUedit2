@@ -11,8 +11,7 @@ function inferProjectFromPath(fullPath) {
 
 export function createImportStageService(deps) {
   const {
-    apiJson,
-    API_BASE,
+    api,
     setStatus,
     clearUploadFormatError,
     setUploadLoading,
@@ -29,7 +28,7 @@ export function createImportStageService(deps) {
 
     let result;
     try {
-      result = await apiJson(`${API_BASE}/dialog/open-file`);
+      result = await api.openFileDialog();
     } catch (err) {
       console.error("File dialog failed:", err);
       setStatus("Failed to open file dialog", "error");

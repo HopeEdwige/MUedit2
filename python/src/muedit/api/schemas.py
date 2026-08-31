@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from muedit.decomp.types import DEFAULT_NBEXTCHAN, DEFAULT_PEEL_OFF_WIN_SEC
+
 
 class PathPayload(BaseModel):
     """Path-based request body used by path-loading endpoints."""
@@ -73,8 +75,8 @@ class EditFilterPayload(BaseModel):
     pulse_train: list[float] | None = None
     view_start: int = 0
     view_end: int = 0
-    nbextchan: int = 1000
-    peel_off_win: float = 0.025
+    nbextchan: int = DEFAULT_NBEXTCHAN
+    peel_off_win: float = DEFAULT_PEEL_OFF_WIN_SEC
     use_peeloff: bool = False
     lock_spikes: bool = False
     flagged: list[bool] | None = None
@@ -120,3 +122,4 @@ class EditFlagPayload(BaseModel):
 
     distimes: list[list[int]]
     mu_index: int = 0
+    flag: bool | None = None

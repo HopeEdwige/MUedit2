@@ -148,7 +148,9 @@ def _load_mat73_signal(path: str) -> dict[str, Any]:
             return _mat73_read(signal_group[name], h5f) if name in signal_group else default
 
         data = _parse_numeric_array(read_field("data"))
-        if data.ndim == 2 and data.shape[0] > data.shape[1]:
+        # MATLAB v7.3 (HDF5) stores 2D arrays transposed (column-major).
+        # scipy.io.loadmat (v5) handles this internally; h5py does not.
+        if data.ndim == 2:
             data = data.T
         n_samples = data.shape[1] if data.ndim == 2 else 0
 

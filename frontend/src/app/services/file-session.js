@@ -96,11 +96,43 @@ export function createFileSessionService(deps) {
     };
   }
 
+  // Gather all BIDS entity fields from the DOM into the snake_case shape the
+  // decompose endpoint expects. Centralizes DOM reads for the run payload.
+  function collectBidsEntities() {
+    const entities = {};
+    const subject = String(els.bidsSubject?.value || "").trim();
+    const task = String(els.bidsTask?.value || "").trim();
+    const session = String(els.bidsSession?.value || "").trim();
+    const run = String(els.bidsRun?.value || "").trim();
+    if (subject) entities.subject = subject;
+    if (task) entities.task = task;
+    if (session) entities.session = session;
+    if (run) entities.run = run;
+    const muscleNames = getBidsMuscleNames();
+    if (muscleNames.length) entities.target_muscle = muscleNames;
+    const powerlineFreq = Number(els.bidsPowerlineFreq?.value || 50);
+    if (powerlineFreq) entities.powerline_freq = powerlineFreq;
+    const manufacturer = String(els.bidsManufacturer?.value || "").trim();
+    if (manufacturer) entities.manufacturer = manufacturer;
+    const deviceModel = String(els.bidsDeviceModel?.value || "").trim();
+    if (deviceModel) entities.manufacturers_model_name = deviceModel;
+    const placementScheme = String(els.bidsPlacementScheme?.value || "").trim();
+    if (placementScheme) entities.placement_scheme = placementScheme;
+    const placementDesc = String(
+      els.bidsPlacementDescription?.value || "",
+    ).trim();
+    if (placementDesc) entities.placement_scheme_description = placementDesc;
+    const taskDescription = String(els.bidsTaskDescription?.value || "").trim();
+    if (taskDescription) entities.task_description = taskDescription;
+    return entities;
+  }
+
   return {
     getBidsProject,
     getBidsMuscleNames,
     getBidsEntityInputs,
     getBidsSaveFields,
+    collectBidsEntities,
     clearUploadFormatError,
     showUnsupportedUploadFormatError,
     isSupportedSignalFile,

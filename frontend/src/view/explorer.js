@@ -1,34 +1,15 @@
+import { renderSelectPair } from "./select-renderers.js";
+
 export function renderMuDropdowns(els, model) {
-  const gridSel = els.muGridSelect;
-  const muSel = els.muSelect;
-  if (!gridSel || !muSel || !model) return;
-
-  gridSel.innerHTML = "";
-  (model.gridOptions || []).forEach((optDef) => {
-    const opt = document.createElement("option");
-    opt.value = String(optDef.value);
-    opt.textContent = optDef.label;
-    gridSel.appendChild(opt);
-  });
-  gridSel.value = String(model.selectedGrid ?? 0);
-
-  muSel.innerHTML = "";
-  if (!model.muOptions?.length) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "No motor units";
-    muSel.appendChild(opt);
-    muSel.disabled = true;
-    return;
-  }
-  muSel.disabled = false;
-  model.muOptions.forEach((optDef) => {
-    const opt = document.createElement("option");
-    opt.value = String(optDef.value);
-    opt.textContent = optDef.label;
-    muSel.appendChild(opt);
-  });
-  muSel.value = String(model.selectedMu ?? model.muOptions[0].value);
+  if (!model) return;
+  renderSelectPair(
+    els.muGridSelect,
+    els.muSelect,
+    model.gridOptions || [],
+    model.muOptions || [],
+    model.selectedGrid,
+    model.selectedMu,
+  );
 }
 
 export function renderMuExplorer(deps, model) {
