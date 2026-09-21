@@ -6,7 +6,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from muedit.io.loaders import load_bids_signal, load_mat, load_otb4, load_otb_plus
+from muedit.io.loaders import (
+    load_bids_signal,
+    load_intan,
+    load_mat,
+    load_otb4,
+    load_otb_plus,
+)
 from muedit.models import SignalImport
 
 LoaderFn = Callable[[str], SignalImport | dict[str, Any]]
@@ -39,6 +45,7 @@ _LOADERS: dict[str, LoaderFn] = {
     ".otb4": load_otb4,
     ".bdf": load_bids_signal,
     ".edf": load_bids_signal,
+    ".rhd": load_intan,
 }
 
 
@@ -58,14 +65,16 @@ def supported_extensions() -> tuple[str, ...]:
 
 
 def get_loader(filepath: str | Path) -> LoaderFn:
-    """Return loader function for filepath extension; accepts a BIDS EMG directory."""
+    """Return loader function for filepath extension; accepts BIDS EMG or Intan directories."""
     path = Path(filepath)
     if path.is_dir():
         candidates = sorted(path.glob("*_emg.bdf")) + sorted(path.glob("*_emg.edf"))
         if candidates:
             return load_bids_signal
+        if sorted(path.glob("*.rhd")):
+            return load_intan
         raise ValueError(
-            f"Directory does not contain a recognized BIDS EMG file: {path}"
+            f"Directory does not contain a recognized BIDS EMG or Intan RHD file: {path}"
         )
     ext = path.suffix.lower()
     loader = _LOADERS.get(ext)
@@ -77,20 +86,14 @@ def get_loader(filepath: str | Path) -> LoaderFn:
     return loader
 
 
-def load_signal(filepath: str) -> dict[str, Any]:
-    """Load a raw signal file and normalize it to the internal mapping shape."""
+def load_signal(filepath: str) -> SignalImport:
+    """Load a raw signal file with the loader registered for its extension."""
     loader_fn = get_loader(filepath)
-    return _as_signal_import(loader_fn(str(filepath))).to_dict()
-
-
-def clone_signal(signal: dict[str, Any]) -> dict[str, Any]:
-    """Deep-copy a signal mapping through validated model serialization."""
-    return SignalImport.from_mapping(signal).clone().to_dict()
+    return _as_signal_import(loader_fn(str(filepath)))
 
 
 __all__ = [
     "LoaderFn",
-    "clone_signal",
     "get_loader",
     "load_signal",
     "register_loader",

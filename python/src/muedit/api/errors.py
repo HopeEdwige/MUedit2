@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException
 
 
 def error_payload(code: str, message: str, detail: Any = None) -> dict[str, Any]:
@@ -18,10 +20,10 @@ def error_payload(code: str, message: str, detail: Any = None) -> dict[str, Any]
 
 
 async def http_exception_handler(_: Request, exc: Exception) -> JSONResponse:
-    """Translate FastAPI HTTPException into project error envelope."""
+    """Translate HTTPException (FastAPI's or Starlette's routing 404/405) into the envelope."""
     if not isinstance(exc, HTTPException):
         return await unhandled_exception_handler(_, exc)
-    detail = exc.detail
+    detail: Any = exc.detail  # Starlette types it str; FastAPI allows any JSON
     message = detail if isinstance(detail, str) else "Request failed"
     return JSONResponse(
         status_code=exc.status_code,
@@ -30,12 +32,11 @@ async def http_exception_handler(_: Request, exc: Exception) -> JSONResponse:
             message=message,
             detail=detail if not isinstance(detail, str) else None,
         ),
+        headers=getattr(exc, "headers", None),
     )
 
 
-async def validation_exception_handler(
-    _: Request, exc: Exception
-) -> JSONResponse:
+async def validation_exception_handler(_: Request, exc: Exception) -> JSONResponse:
     """Translate request model validation failures into project envelope."""
     if not isinstance(exc, RequestValidationError):
         return await unhandled_exception_handler(_, exc)
@@ -44,7 +45,7 @@ async def validation_exception_handler(
         content=error_payload(
             code="validation_error",
             message="Request validation failed",
-            detail=exc.errors(),
+            detail=jsonable_encoder(exc.errors()),  # ``input`` can be raw body bytes
         ),
     )
 

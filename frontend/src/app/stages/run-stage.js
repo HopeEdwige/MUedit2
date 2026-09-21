@@ -17,44 +17,51 @@ import {
   setRunView,
 } from "../../state/actions.js";
 import { getRunMuIndicesForGrid } from "../../state/selectors.js";
+import {
+  DEFAULT_POSTPROCESS_MODE,
+  POSTPROCESS_MODES,
+  buildDecomposeParams,
+} from "../../decomp/params.js";
+import { drawSeries } from "../../view/plots.js";
 
-export function createRunStageService(deps) {
-  const {
-    state,
-    els,
-    api,
-    drawSeries,
-    drawGridOverlay,
-    getSuggestedNpzName,
-    persistNpzBySaveTarget,
-    getBidsProject,
-    getBidsMuscleNames,
-    collectBidsEntities,
-    buildParams,
-    updateStartAvailability,
-    switchStage,
-    setStatus,
-    updateProgress,
-    setProgressText,
-    setNwindows,
-    emgCanvasId,
-    ensureDiscardMasks,
-    renderChannelQC,
-    getCurrentGrid,
-    requestQcGridWindow,
-    showWorkspace,
-    renderBidsAutoInfo,
-    renderBidsMuscleFields,
-    populateAuxSelector,
-    renderAuxiliaryChannels,
-    enableRoiSelection,
-    loadDecompositionForEditByPath,
-  } = deps;
+/** @typedef {import("../context.js").App} App */
+/** @typedef {import("../context.js").RunStage} RunStage */
 
+/**
+ * @param {App} app
+ * @returns {import("../context.js").RunStage}
+ */
+export function createRunStageService(app) {
+  const { state, els } = app;
+
+  /** @type {RunStage["updateStartAvailability"]} */
+  function updateStartAvailability() {
+    if (els.start) {
+      els.start.disabled = !state.file || state.isRunning;
+    }
+  }
+
+  /** @type {RunStage["buildParams"]} */
+  function buildParams() {
+    return buildDecomposeParams({
+      niter: Number(els.niter?.value) || 150,
+      nwindows: Number(els.nwindows?.value) || 1,
+      peelOn: app.isToggleOn(els.peelOffToggle),
+      postprocessMode: els.postprocessMode?.value || "windowed",
+      covOn: app.isToggleOn(els.covToggle),
+      peelWindow: Number(els.peelOffWindow?.value) || 25,
+      covVal: Number(els.covValue?.value) || 0.5,
+      silVal: Number(els.silValue?.value) || 0.9,
+      duplicatesthresh: Number(els.duplicatesthresh?.value) || 0.3,
+    });
+  }
+
+  /** @type {RunStage["getMuIndicesForGrid"]} */
   function getMuIndicesForGrid(gridIdx) {
     return getRunMuIndicesForGrid(state, gridIdx);
   }
 
+  /** @type {RunStage["renderMuDropdowns"]} */
   function renderMuDropdowns() {
     const model = buildRunMuDropdownModelFeature({
       state,
@@ -75,6 +82,7 @@ export function createRunStageService(deps) {
     renderMuDropdownsController(els, model);
   }
 
+  /** @type {RunStage["renderMuExplorer"]} */
   function renderMuExplorer() {
     renderMuDropdowns();
     const model = buildRunMuExplorerModelFeature({
@@ -88,78 +96,20 @@ export function createRunStageService(deps) {
     renderMuExplorerController({ els, drawSeries }, model);
   }
 
-  function autoSaveRunDecomposition() {
-    return autoSaveRunDecompositionFeature({
-      state,
-      getSuggestedNpzName,
-      persistNpzBySaveTarget,
-      getBidsMuscleNames,
-      setStatus,
-      onSaved: loadDecompositionForEditByPath || null,
-    });
-  }
-
-  function handleStreamMessage(msg) {
-    return handleStreamMessageFeature(
-      {
-        state,
-        api,
-        setStatus,
-        updateProgress,
-        setProgressText,
-        ensureDiscardMasks,
-        renderChannelQC,
-        getCurrentGrid,
-        requestQcGridWindow,
-        drawGridOverlay,
-        showWorkspace,
-        renderMuExplorer,
-        renderBidsAutoInfo,
-        renderBidsMuscleFields,
-        populateAuxSelector,
-        renderAuxiliaryChannels,
-        enableRoiSelection,
-        autoSaveRunDecomposition,
-        setNwindows,
-        emgCanvasId,
-      },
-      msg,
-    );
-  }
-
-  function runDecomposition() {
-    return runDecompositionFeature({
-      state,
-      api,
-      getBidsProject,
-      collectBidsEntities,
-      buildParams,
-      updateStartAvailability,
-      switchStage,
-      setStatus,
-      updateProgress,
-      handleStreamMessageFn: handleStreamMessage,
-    });
-  }
-
   return {
     getMuIndicesForGrid,
     renderMuDropdowns,
     renderMuExplorer,
-    autoSaveRunDecomposition,
-    handleStreamMessage,
-    runDecomposition,
+    autoSaveRunDecomposition: () => autoSaveRunDecompositionFeature(app),
+    handleStreamMessage: (msg) => handleStreamMessageFeature(app, msg),
+    runDecomposition: () => runDecompositionFeature(app),
+    updateStartAvailability,
+    buildParams,
   };
 }
 
-/**
- * @typedef {import('../deps.js').RunSetupDeps} RunSetupDeps
- */
-
-/**
- * @param {RunSetupDeps} deps
- */
-export function setupRunEvents(deps) {
+/** @param {App} app */
+export function setupRunEvents(app) {
   const {
     els,
     state,
@@ -173,48 +123,65 @@ export function setupRunEvents(deps) {
     updateStartAvailability,
     renderAuxiliaryChannels,
     renderMuExplorer,
-  } = deps;
+    runAutoQc,
+    toggleArtifactMode,
+    removeLastArtifact,
+  } = app;
 
   els.start?.addEventListener("click", runDecomposition);
+  els.qcAutoBtn?.addEventListener("click", runAutoQc);
+  els.artifactAddBtn?.addEventListener("click", toggleArtifactMode);
+  els.artifactRemoveBtn?.addEventListener("click", removeLastArtifact);
+  refreshVisuals();
 
   enableRoiSelection("emgCanvas");
 
   if (els.nwindows) {
-    els.nwindows.addEventListener("change", (e) => {
+    els.nwindows.addEventListener("change", () => {
       const nwin = Number(els.nwindows.value) || 1;
       syncRois(nwin);
       refreshVisuals();
-      e.target.blur();
+      els.nwindows.blur();
     });
   }
 
   setupToggle(els.peelOffToggle, (on) =>
     toggleConditional("peelOffSettings", on),
   );
-  setupToggle(els.useAdaptiveToggle);
-  setupToggle(els.fullTraceToggle);
+  const renderPostprocessHint = () => {
+    if (!els.postprocessModeHint) return;
+    const mode =
+      POSTPROCESS_MODES[els.postprocessMode?.value] ||
+      POSTPROCESS_MODES[DEFAULT_POSTPROCESS_MODE];
+    els.postprocessModeHint.textContent = mode.hint;
+  };
+  renderPostprocessHint();
+  els.postprocessMode?.addEventListener("change", () => {
+    renderPostprocessHint();
+    els.postprocessMode.blur();
+  });
   setupToggle(els.covToggle, (on) => toggleConditional("covSettings", on));
   setupLockedOnToggle(els.silToggle, (on) =>
     toggleConditional("silSettings", on),
   );
   updateStartAvailability();
 
-  els.auxSelector?.addEventListener("change", (e) => {
+  els.auxSelector?.addEventListener("change", () => {
     renderAuxiliaryChannels();
-    e.target.blur();
+    els.auxSelector.blur();
   });
 
-  els.muGridSelect?.addEventListener("change", (e) => {
-    const idx = Number(e.target.value) || 0;
+  els.muGridSelect?.addEventListener("change", () => {
+    const idx = Number(els.muGridSelect.value) || 0;
     setRunCurrentMuGrid(state, idx, { resetView: true });
     renderMuExplorer();
-    e.target.blur();
+    els.muGridSelect.blur();
   });
 
-  els.muSelect?.addEventListener("change", (e) => {
-    const idx = Number(e.target.value);
+  els.muSelect?.addEventListener("change", () => {
+    const idx = Number(els.muSelect.value);
     setRunCurrentMu(state, idx, { resetView: true });
     renderMuExplorer();
-    e.target.blur();
+    els.muSelect.blur();
   });
 }

@@ -42,14 +42,10 @@ python/*.log
 # ── Frontend ────────────────────────────────────────────────────────────────
 frontend/node_modules/
 
-# ── Linter & formatter configs and caches (local dev only) ──────────────────
+# ── Linter & formatter caches ───────────────────────────────────────────────
 .eslintcache
 .prettiercache
 .stylelintcache
-frontend/eslint.config.js
-frontend/.prettierrc.json
-frontend/.prettierignore
-frontend/package-lock.json
 
 # ── EMG data files (large binaries — store on Figshare or similar) ─────────
 
@@ -61,7 +57,6 @@ frontend/package-lock.json
 *.otb+
 *.npz
 
-
 # ── BIDS output directories ────────────────────────────────────────────────────────────────
 bids_out/
 bids_export/
@@ -70,12 +65,16 @@ emg-2/
 *.mp4 
 
 /Mat Files/
-emg-2/
-*.mp4
-/Mat Files/
 
 # ── Data subfolders ────────────────────────────────────────────────────────
 data/*/
 
-# ── Local test scripts and outputs ─────────────────────────────────────────
-tests/
+# ── Local recordings (files, folders and symlinks) ─────────────────────────
+data/*
+
+# ── Test outputs (rewritten on every run) ──────────────────────────────────
+tests/reports/
+tests/benchmark_leaderboard.json
+
+# ── Local research scripts ──────────────────────────────────────────────────
+research/

@@ -6,22 +6,13 @@ from typing import Any
 
 import numpy as np
 
+from muedit.models import LoadedDecomposition
 
-def _expected_grid_count(loaded: dict[str, Any]) -> int:
-    count = 0
-    grid_names = loaded.get("grid_names")
-    if isinstance(grid_names, list):
-        count = max(count, len(grid_names))
-    muscles = loaded.get("muscle")
-    if isinstance(muscles, list):
-        count = max(count, len(muscles))
-    mu_grid_index = loaded.get("mu_grid_index")
-    if isinstance(mu_grid_index, list) and mu_grid_index:
-        try:
-            count = max(count, int(max(mu_grid_index)) + 1)
-        except Exception:
-            pass
-    return max(1, count)
+
+def _expected_grid_count(decomp: LoadedDecomposition) -> int:
+    """Number of grids implied by the names, muscles and MU-to-grid indices."""
+    from_index = max(decomp.mu_grid_index) + 1 if decomp.mu_grid_index else 0
+    return max(1, len(decomp.grid_names), len(decomp.muscle), from_index)
 
 
 def _pad_grid_names(names: list[str], expected_count: int, fallback: list[str]) -> list[str]:
@@ -81,3 +72,12 @@ def _coerce_dup_tol(raw: Any, default: float = 0.3) -> float:
     while isinstance(raw, (list, tuple, np.ndarray)) and np.ndim(raw) > 0:
         raw = raw[0] if len(raw) > 0 else default
     return float(raw)
+
+
+def _coerce_bool_param(raw: Any) -> bool:
+    """Coerce a boolean parameter such as ``duplicatesbgrids`` (MATLAB stores 0/1), unwrapping nested lists."""
+    while isinstance(raw, (list, tuple, np.ndarray)) and np.ndim(raw) > 0:
+        raw = raw[0] if len(raw) > 0 else False
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)

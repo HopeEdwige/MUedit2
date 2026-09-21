@@ -8,6 +8,8 @@ import h5py
 import numpy as np
 import scipy.io
 
+from muedit.models import SignalImport
+
 
 def _parse_text(value: Any) -> str:
     if value is None:
@@ -23,26 +25,21 @@ def _parse_text(value: Any) -> str:
             return "".join(str(x) for x in value.flatten().tolist()).strip()
         if np.issubdtype(value.dtype, np.integer):
             flat = value.flatten()
-            try:
-                if flat.size > 0 and np.max(flat) < 256:
+            if flat.size > 0 and np.max(flat) < 256:
+                try:
                     return "".join(chr(int(c)) for c in flat if int(c) != 0).strip()
-            except Exception:
-                pass
-            try:
-                if value.dtype == np.uint16:
-                    return flat.tobytes().decode("utf-16-le", errors="ignore").strip("\x00").strip()
-            except Exception:
-                pass
-            try:
-                if value.dtype == np.uint32:
-                    return flat.tobytes().decode("utf-32-le", errors="ignore").strip("\x00").strip()
-            except Exception:
-                pass
+                except ValueError:
+                    pass  # negative codes: not a char array, try the wide encodings
+            # errors="ignore" means these decodes cannot raise.
+            if value.dtype == np.uint16:
+                return flat.tobytes().decode("utf-16-le", errors="ignore").strip("\x00").strip()
+            if value.dtype == np.uint32:
+                return flat.tobytes().decode("utf-32-le", errors="ignore").strip("\x00").strip()
             return ""
     return str(value).strip()
 
 
-def _parse_text_list(value: Any) -> list[str]:
+def parse_text_list(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, (str, bytes)):
@@ -55,17 +52,17 @@ def _parse_text_list(value: Any) -> list[str]:
         if value.dtype == object:
             out: list[str] = []
             for item in value.flatten().tolist():
-                out.extend(_parse_text_list(item))
+                out.extend(parse_text_list(item))
             return out
         if value.dtype.kind in {"S", "U", "i", "u"}:
             text = _parse_text(value)
             return [text] if text else []
         return [t for t in (_parse_text(item) for item in value.flatten().tolist()) if t]
     if isinstance(value, (list, tuple)):
-        out: list[str] = []
+        items: list[str] = []
         for item in value:
-            out.extend(_parse_text_list(item))
-        return out
+            items.extend(parse_text_list(item))
+        return items
     text = _parse_text(value)
     return [text] if text else []
 
@@ -81,9 +78,9 @@ def _parse_numeric_array(value: Any, *, default_cols: int = 0) -> np.ndarray:
     return arr
 
 
-def _mat73_read(node: h5py.Dataset | h5py.Group, h5file: h5py.File) -> Any:
+def mat73_read(node: h5py.Dataset | h5py.Group, h5file: h5py.File) -> Any:
     if isinstance(node, h5py.Group):
-        return {key: _mat73_read(node[key], h5file) for key in node.keys()}
+        return {key: mat73_read(node[key], h5file) for key in node}
 
     raw = node[()]
     if isinstance(raw, bytes):
@@ -99,7 +96,7 @@ def _mat73_read(node: h5py.Dataset | h5py.Group, h5file: h5py.File) -> Any:
         values: list[Any] = []
         for ref in refs:
             if isinstance(ref, h5py.Reference) and ref:
-                values.append(_mat73_read(h5file[ref], h5file))
+                values.append(mat73_read(h5file[ref], h5file))
             else:
                 values.append(ref)
         if arr.size == 1:
@@ -135,7 +132,7 @@ def _raise_if_decomposition_signal_fields(field_names: set[str]) -> None:
         )
 
 
-def _load_mat73_signal(path: str) -> dict[str, Any]:
+def _load_mat73_signal(path: str) -> SignalImport:
     with h5py.File(path, "r") as h5f:
         if "signal" not in h5f:
             raise ValueError("Key 'signal' not found in MAT file.")
@@ -145,7 +142,7 @@ def _load_mat73_signal(path: str) -> dict[str, Any]:
         _raise_if_decomposition_signal_fields(set(signal_group.keys()))
 
         def read_field(name: str, default: Any = None) -> Any:
-            return _mat73_read(signal_group[name], h5f) if name in signal_group else default
+            return mat73_read(signal_group[name], h5f) if name in signal_group else default
 
         data = _parse_numeric_array(read_field("data"))
         # MATLAB v7.3 (HDF5) stores 2D arrays transposed (column-major).
@@ -164,22 +161,17 @@ def _load_mat73_signal(path: str) -> dict[str, Any]:
             _parse_numeric_array(read_field("auxiliary"), default_cols=n_samples),
             n_samples,
         )
-        emgnotgrid = _align_to_n_samples(
-            _parse_numeric_array(read_field("emgnotgrid"), default_cols=n_samples),
-            n_samples,
-        )
 
         device_name = _parse_text(read_field("device_name")) or None
 
-        return {
-            "data": data,
-            "fsamp": fsamp,
-            "gridname": _parse_text_list(read_field("gridname")),
-            "muscle": _parse_text_list(read_field("muscle")),
-            "auxiliary": auxiliary,
-            "auxiliaryname": _parse_text_list(read_field("auxiliaryname")),
-            "emgnotgrid": emgnotgrid,
-            "metadata": {
+        return SignalImport.build(
+            data=data,
+            fsamp=fsamp,
+            gridname=parse_text_list(read_field("gridname")),
+            muscle=parse_text_list(read_field("muscle")),
+            auxiliary=auxiliary,
+            auxiliaryname=parse_text_list(read_field("auxiliaryname")),
+            metadata={
                 "device_name": device_name,
                 "software_versions": "MATLAB",
                 "hardware_filters": None,
@@ -187,19 +179,18 @@ def _load_mat73_signal(path: str) -> dict[str, Any]:
                 "recording_type": "continuous",
                 "software_filters": "n/a",
             },
-        }
+        )
 
 
-def load_mat(filepath: str) -> dict[str, Any]:
-    """Load legacy MATLAB signal struct into MUedit signal dictionary format."""
+def load_mat(filepath: str) -> SignalImport:
+    """Load a MATLAB ``signal`` struct (v5 or v7.3) as a ``SignalImport``."""
     try:
         mat = scipy.io.loadmat(filepath, struct_as_record=False, squeeze_me=True)
         if "signal" in mat:
             signal_struct = mat["signal"]
-            signal = {}
             field_names = set()
             if hasattr(signal_struct, "_fieldnames"):
-                field_names = set(getattr(signal_struct, "_fieldnames") or [])
+                field_names = set(signal_struct._fieldnames or [])
             _raise_if_decomposition_signal_fields(field_names)
 
             def get_attr(obj: Any, name: str, default: Any = None) -> Any:
@@ -209,26 +200,19 @@ def load_mat(filepath: str) -> dict[str, Any]:
 
             data = get_attr(signal_struct, "data")
             n_samples = data.shape[1] if data is not None else 0
-            signal["data"] = data
-            signal["fsamp"] = get_attr(signal_struct, "fsamp")
-            signal["gridname"] = get_attr(signal_struct, "gridname") or []
-            signal["muscle"] = get_attr(signal_struct, "muscle") or []
-            device_name = get_attr(signal_struct, "device_name", None)
-            signal["auxiliary"] = get_attr(
-                signal_struct, "auxiliary", np.zeros((0, n_samples))
+            return SignalImport.build(
+                data=data,
+                fsamp=get_attr(signal_struct, "fsamp"),
+                gridname=parse_text_list(get_attr(signal_struct, "gridname")),
+                muscle=parse_text_list(get_attr(signal_struct, "muscle")),
+                auxiliary=get_attr(signal_struct, "auxiliary", np.zeros((0, n_samples))),
+                auxiliaryname=parse_text_list(get_attr(signal_struct, "auxiliaryname")),
+                metadata={
+                    "device_name": get_attr(signal_struct, "device_name", None),
+                    "software_versions": "MATLAB",
+                },
             )
-            signal["auxiliaryname"] = get_attr(signal_struct, "auxiliaryname", [])
-            signal["emgnotgrid"] = get_attr(
-                signal_struct, "emgnotgrid", np.zeros((0, n_samples))
-            )
-            signal["metadata"] = {
-                "device_name": device_name,
-                "software_versions": "MATLAB",
-            }
-
-            return signal
-        else:
-            raise ValueError("Key 'signal' not found in MAT file.")
+        raise ValueError("Key 'signal' not found in MAT file.")
     except NotImplementedError as exc:
         if "matlab v7.3" not in str(exc).lower() and not h5py.is_hdf5(filepath):
             raise OSError(f"Failed to load MAT file: {exc}") from exc

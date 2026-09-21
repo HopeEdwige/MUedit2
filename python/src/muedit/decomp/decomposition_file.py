@@ -1,0 +1,809 @@
+"""Decomposition files: the app .npz schema (save + load), MUedit .mat loading,
+and signal-context normalization."""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any, NamedTuple
+
+import h5py
+import numpy as np
+import scipy.io
+
+from muedit.io.mat import mat73_read, parse_text_list
+from muedit.models import EditSignalContext, LoadedDecomposition
+
+logger = logging.getLogger(__name__)
+
+# BIDS-facing metadata fields a loader may attach to the signal context. Single
+# source of truth shared with the API edit-signal cache so the two never drift.
+LOADER_BIDS_META_KEYS: tuple[str, ...] = (
+    "manufacturer",
+    "device_name",
+    "powerline_freq",
+    "gains",
+    "emg_hpf",
+    "emg_lpf",
+    "aux_gains",
+    "aux_hpf",
+    "aux_lpf",
+    "aux_units",
+    "hardware_filters",
+    "units",
+    "recording_type",
+    "software_filters",
+    "software_versions",
+)
+
+
+class DecompositionLoad(NamedTuple):
+    """Normalized decomposition artifact fields extracted from a .npz or .mat file."""
+
+    pulse_trains: Any
+    distime_raw: Any
+    fsamp: float | None
+    total_samples: int | None
+    grid_names: list[str]
+    mu_grid_index: list[int]
+    parameters: dict[str, Any]
+    rois: list[tuple[int, int]]
+    muscles: list[str]
+    sil: list[float]
+    artifact_mask: np.ndarray | None = None
+
+
+def pack_object_array(items: list[Any]) -> np.ndarray:
+    """Pack a list of arrays into a 1-D object ndarray of consistent shape."""
+    arr = np.empty(len(items), dtype=object)
+    for i, item in enumerate(items):
+        arr[i] = item
+    return arr
+
+
+def save_decomposition_npz(
+    out_path: str | Path,
+    pulse_trains: np.ndarray,
+    distimes: list[np.ndarray] | list[list[int]],
+    fsamp: float,
+    grid_names: list[str],
+    mu_grid_index: list[int],
+    muscles: list[str],
+    parameters: dict[str, Any],
+    total_samples: int,
+    extras: dict[str, Any] | None = None,
+) -> None:
+    """Save a decomposition in the app .npz schema read by :func:`_load_npz_decomp`.
+
+    Shared by the decomposition pipeline and the edit-stage save so both write
+    the same core keys.
+    """
+    payload: dict[str, Any] = {
+        "pulse_trains": pulse_trains,
+        "discharge_times": pack_object_array([np.asarray(d, dtype=int) for d in distimes]),
+        "fsamp": fsamp,
+        "grid_names": np.array(grid_names, dtype=object),
+        "mu_grid_index": np.array(mu_grid_index, dtype=int),
+        "muscle": np.array(muscles, dtype=object),
+        "parameters": np.array([parameters], dtype=object),
+        "total_samples": total_samples,
+    }
+    if extras:
+        payload.update(extras)
+    np.savez_compressed(out_path, **payload)
+
+
+def normalize_distimes(raw: Any) -> list[list[int]]:
+    """Normalize discharge-time payloads into ``list[list[int]]`` format."""
+    if isinstance(raw, np.ndarray) and raw.dtype == object:
+        return normalize_distimes(raw.tolist())
+    if isinstance(raw, (list, tuple)):
+        result: list[list[int]] = []
+        for item in raw:
+            if item is None:
+                result.append([])
+            else:
+                result.append(sorted(set(_collect_positive_ints(item))))
+        return result
+    return []
+
+
+def _collect_positive_ints(value: Any) -> list[int]:
+    """Flatten one per-MU payload element into a list of non-negative ints."""
+    if isinstance(value, np.ndarray):
+        return [int(v) for v in value.astype(int).flatten().tolist() if int(v) >= 0]
+    if isinstance(value, (list, tuple)):
+        return [int(v) for v in value if int(v) >= 0]
+    v = int(value)
+    return [v] if v >= 0 else []
+
+
+def first_non_none(*values: Any) -> Any:
+    """Return the first argument that is not ``None``."""
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def build_pulse_trains_from_distimes(distimes: list[list[int]], total_samples: int) -> np.ndarray:
+    """Create a binary pulse-train matrix from discharge-time indices."""
+    nmu = len(distimes)
+    pulses = np.zeros((nmu, total_samples), dtype=float)
+    for idx, times in enumerate(distimes):
+        if not times:
+            continue
+        t = np.asarray(times, dtype=int)
+        t = t[(t >= 0) & (t < total_samples)]
+        pulses[idx, t] = 1.0
+    return pulses
+
+
+def save_editlog(
+    editlog_path: Path,
+    mu_uids: list[str],
+    edit_history: list[dict[str, Any]],
+    artifact_times: list[list[int]] | None = None,
+) -> None:
+    """Write a JSON editlog sidecar alongside a decomposition artifact."""
+    payload: dict[str, Any] = {"mu_uids": mu_uids, "history": edit_history}
+    if artifact_times:
+        payload["artifact_times"] = artifact_times
+    with editlog_path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+
+
+def _parse_mu_grid_index(raw: Any) -> list[int]:
+    """Normalize MU-to-grid assignment payloads to a flat integer list."""
+    if raw is None:
+        return []
+    return [int(x) for x in np.array(raw).flatten().tolist()]
+
+
+def _get_case_insensitive(mapping: Any, *names: str) -> Any:
+    """Return the first value found under any of ``names`` in ``mapping``, case-insensitively."""
+    if not isinstance(mapping, dict):
+        return None
+    for name in names:
+        if name in mapping:
+            return mapping[name]
+    lower_map = {str(k).lower(): v for k, v in mapping.items()}
+    for name in names:
+        key = str(name).lower()
+        if key in lower_map:
+            return lower_map[key]
+    return None
+
+
+def _normalize_pulse_matrix(pulse: Any) -> Any:
+    """Orient a 2-D pulse matrix so rows are MUs and columns are samples."""
+    if not isinstance(pulse, np.ndarray):
+        return pulse
+    if pulse.ndim != 2:
+        return pulse
+    if pulse.shape[0] > pulse.shape[1]:
+        return pulse.T
+    return pulse
+
+
+def _unwrap_parameters(raw: Any) -> dict[str, Any]:
+    """Unwrap a single-element object ndarray and return it as a dict."""
+    if isinstance(raw, np.ndarray) and raw.dtype == object and raw.size == 1:
+        raw = raw.item()
+    return raw if isinstance(raw, dict) else {}
+
+
+def _resolve_muscles(primary_raw: Any, parameters: dict[str, Any]) -> list[str]:
+    """Resolve target muscle names from a primary payload or the parameters fallback."""
+    muscles = parse_text_list(primary_raw)
+    if not muscles:
+        muscles = parse_text_list(parameters.get("target_muscle"))
+    return muscles
+
+
+def _parse_rois(rois_raw: Any) -> list[tuple[int, int]]:
+    """Parse ``preview.rois`` into a list of ``(start, end)`` sample pairs."""
+    if rois_raw is None or np.asarray(rois_raw).size == 0:
+        return []
+    try:
+        arr = np.asarray(rois_raw, dtype=int).reshape(-1, 2)
+    except (TypeError, ValueError):
+        logger.warning(
+            "ROI data could not be reshaped into (start, end) pairs; ignoring ROIs (raw shape: %s)",
+            np.asarray(rois_raw).shape,
+        )
+        return []
+    return [(int(start), int(end)) for start, end in arr]
+
+
+def _extract_decomp_fields(
+    signal: dict[str, Any],
+    preview_block: dict[str, Any],
+    edition: Any,
+    top: dict[str, Any],
+) -> DecompositionLoad:
+    """Extract decomposition fields from pre-parsed MAT-derived dicts."""
+    source = edition if isinstance(edition, dict) else signal
+    pulse_trains = _get_case_insensitive(source, "Pulsetrain")
+    if pulse_trains is None:
+        pulse_trains = np.array([])
+    if isinstance(pulse_trains, np.ndarray) and pulse_trains.dtype != object:
+        pulse_trains = _normalize_pulse_matrix(pulse_trains)
+    distime_raw = _get_case_insensitive(source, "Dischargetimes")
+
+    fsamp_val = first_non_none(
+        _get_case_insensitive(signal, "fsamp"),
+        top.get("fsamp"),
+    )
+    fsamp = float(np.asarray(fsamp_val).ravel()[0]) if fsamp_val is not None else None
+
+    data_block = _get_case_insensitive(signal, "data")
+    total_samples = _infer_total_samples_from_pulse(pulse_trains)
+    if total_samples is None and isinstance(data_block, np.ndarray):
+        data_norm = _normalize_pulse_matrix(data_block)
+        total_samples = int(data_norm.shape[1]) if data_norm.ndim == 2 else None
+
+    rois = _parse_rois(_get_case_insensitive(preview_block, "rois"))
+
+    gnames = first_non_none(top.get("grid_names"), _get_case_insensitive(signal, "gridname"))
+    grid_names = parse_text_list(gnames) if gnames is not None else ["Grid 1"]
+
+    mu_grid_index = _parse_mu_grid_index(top.get("mu_grid_index"))
+
+    parameters = _unwrap_parameters(top.get("parameters"))
+    muscles = _resolve_muscles(_get_case_insensitive(signal, "muscle"), parameters)
+
+    return DecompositionLoad(
+        pulse_trains=pulse_trains,
+        distime_raw=distime_raw,
+        fsamp=fsamp,
+        total_samples=total_samples,
+        grid_names=grid_names,
+        mu_grid_index=mu_grid_index,
+        parameters=parameters,
+        rois=rois,
+        muscles=muscles,
+        sil=[],
+    )
+
+
+def _load_mat73_decomp(filepath: str) -> DecompositionLoad:
+    """Load a MATLAB v7.3 (HDF5) decomposition file into a DecompositionLoad."""
+    with h5py.File(filepath, "r") as h5f:
+
+        def read_root(name: str) -> Any:
+            return mat73_read(h5f[name], h5f) if name in h5f else None
+
+        signal = read_root("signal")
+        if not isinstance(signal, dict):
+            signal = {}
+        preview_block = read_root("preview")
+        if not isinstance(preview_block, dict):
+            preview_block = {}
+        top = {
+            "grid_names": read_root("grid_names"),
+            "mu_grid_index": read_root("mu_grid_index"),
+            "parameters": read_root("parameters"),
+            "fsamp": read_root("fsamp"),
+        }
+        return _extract_decomp_fields(signal, preview_block, read_root("edition"), top)
+
+
+def _load_npz_decomp(filepath: str) -> DecompositionLoad:
+    """Load decomposition artifacts saved in MUedit NPZ format."""
+    data = np.load(filepath, allow_pickle=True)
+    pulse_trains = data.get("pulse_trains", np.array([]))
+    distime_raw = data.get("discharge_times")
+    fsamp_val = data.get("fsamp")
+    fsamp = float(np.asarray(fsamp_val).ravel()[0]) if fsamp_val is not None else None
+    stored_total = data.get("total_samples")
+    if stored_total is not None and int(stored_total) > 0:
+        total_samples = int(stored_total)
+    elif getattr(pulse_trains, "ndim", 0) == 2:
+        total_samples = int(pulse_trains.shape[1])
+    else:
+        total_samples = None
+
+    grid_names = (
+        parse_text_list(data.get("grid_names")) if data.get("grid_names") is not None else []
+    )
+    mu_grid_index = _parse_mu_grid_index(data.get("mu_grid_index"))
+
+    parameters = _unwrap_parameters(data.get("parameters"))
+    muscles = _resolve_muscles(
+        first_non_none(data.get("muscle"), data.get("muscle_names")), parameters
+    )
+
+    rois = _parse_rois(data.get("rois"))
+
+    sil: list[float] = []
+    sil_raw = data.get("sil")
+    if sil_raw is not None:
+        sil = np.asarray(sil_raw, dtype=float).flatten().tolist()
+
+    artifact_mask_raw = data.get("artifact_mask")
+    artifact_mask: np.ndarray | None = None
+    if artifact_mask_raw is not None:
+        artifact_mask = np.asarray(artifact_mask_raw, dtype=bool)
+
+    return DecompositionLoad(
+        pulse_trains=pulse_trains,
+        distime_raw=distime_raw,
+        fsamp=fsamp,
+        total_samples=total_samples,
+        grid_names=grid_names,
+        mu_grid_index=mu_grid_index,
+        parameters=parameters,
+        rois=rois,
+        muscles=muscles,
+        sil=sil,
+        artifact_mask=artifact_mask,
+    )
+
+
+def _load_mat_decomp(filepath: str) -> DecompositionLoad:
+    """Load decomposition artifacts from MATLAB MAT structures."""
+    if h5py.is_hdf5(filepath):
+        return _load_mat73_decomp(filepath)
+    mat = scipy.io.loadmat(filepath, simplify_cells=True)
+
+    signal = mat.get("signal")
+    if not isinstance(signal, dict):
+        signal = {}
+    preview_block = mat.get("preview")
+    if not isinstance(preview_block, dict):
+        preview_block = {}
+    return _extract_decomp_fields(signal, preview_block, mat.get("edition"), mat)
+
+
+def _coerce_pulse_matrix(value: Any) -> np.ndarray | None:
+    """Coerce a value into a 2-D float pulse matrix, or return None."""
+    if isinstance(value, np.ndarray):
+        if value.dtype == object:
+            return None
+        arr = np.asarray(value, dtype=float)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.ndim != 2:
+            return None
+        return _normalize_pulse_matrix(arr)
+    return None
+
+
+def _extract_grid_pulse_blocks(raw: Any) -> list[np.ndarray]:
+    """Split per-grid pulse-train cell arrays into a list of 2-D arrays."""
+    # Handle ngrid=1: scipy.io simplifies a {1×1 cell} to a bare numeric matrix.
+    block = _coerce_pulse_matrix(raw)
+    if block is not None and block.size > 0:
+        return [block]
+    blocks: list[np.ndarray] = []
+    for item in _top_level_cell_items(raw):
+        block = _coerce_pulse_matrix(item)
+        if block is not None and block.size > 0:
+            blocks.append(block)
+    return blocks
+
+
+def _extract_grid_distime_blocks(
+    raw: Any, expected_grids: int | None = None
+) -> list[list[list[int]]]:
+    """Split per-grid discharge-time cell arrays into nested lists of MU index lists."""
+
+    def _mu_vector(cell: Any) -> list[int]:
+        if cell is None:
+            return []
+        return sorted(set(_collect_positive_ints(cell)))
+
+    if expected_grids == 1 and isinstance(raw, (list, tuple, np.ndarray)):
+        if isinstance(raw, np.ndarray) and raw.ndim > 1:
+            raw = np.squeeze(raw)
+        all_mu = normalize_distimes(raw)
+        return [all_mu] if all_mu else []
+
+    blocks: list[list[list[int]]] = []
+    if isinstance(raw, np.ndarray) and raw.dtype == object:
+        arr = np.asarray(raw, dtype=object)
+        if arr.ndim == 2:
+            rows: list[list[Any]]
+            if expected_grids and arr.shape[0] == expected_grids:
+                rows = [arr[g, :].tolist() for g in range(arr.shape[0])]
+            elif expected_grids and arr.shape[1] == expected_grids:
+                rows = [arr[:, g].tolist() for g in range(arr.shape[1])]
+            else:
+                rows = [arr[g, :].tolist() for g in range(arr.shape[0])]
+
+            for row in rows:
+                mu_lists: list[list[int]] = []
+                for cell in row:
+                    mu_vec = _mu_vector(cell)
+                    if mu_vec:
+                        mu_lists.append(mu_vec)
+                if mu_lists:
+                    blocks.append(mu_lists)
+            return blocks
+
+    items = _top_level_cell_items(raw)
+    for item in items:
+        mu_lists = normalize_distimes(item)
+        mu_lists = [mu for mu in mu_lists if mu]
+        if mu_lists:
+            blocks.append(mu_lists)
+    return blocks
+
+
+def _top_level_cell_items(raw: Any) -> list[Any]:
+    """Flatten an object ndarray or sequence into a list of top-level cell items."""
+    if isinstance(raw, np.ndarray) and raw.dtype == object:
+        squeezed = np.squeeze(raw)
+        if squeezed.ndim == 0:
+            return [squeezed.item()]
+        if squeezed.ndim == 1:
+            return squeezed.tolist()
+        return list(squeezed)
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    return []
+
+
+def _unpack_gridwise_decomposition(
+    pulse_trains: Any,
+    distime_raw: Any,
+    mu_grid_index: list[int],
+) -> tuple[Any, Any, list[int]]:
+    """Stack per-grid pulse/distime blocks and infer MU-to-grid indices."""
+    pulse_blocks = _extract_grid_pulse_blocks(pulse_trains)
+    distime_blocks = _extract_grid_distime_blocks(
+        distime_raw,
+        expected_grids=(len(pulse_blocks) if pulse_blocks else None),
+    )
+
+    inferred_from_pulse: list[int] = []
+    if pulse_blocks:
+        n_samples = pulse_blocks[0].shape[1]
+        if all(block.shape[1] == n_samples for block in pulse_blocks):
+            pulse_trains = np.vstack(pulse_blocks)
+            inferred_from_pulse = [
+                g_idx
+                for g_idx, block in enumerate(pulse_blocks)
+                for _ in range(int(block.shape[0]))
+            ]
+
+    inferred_from_distime: list[int] = []
+    if distime_blocks:
+        flat_distimes: list[list[int]] = []
+        if pulse_blocks:
+            for g_idx, pblock in enumerate(pulse_blocks):
+                expected_mu = int(pblock.shape[0])
+                mu_lists = distime_blocks[g_idx] if g_idx < len(distime_blocks) else []
+                aligned = list(mu_lists[:expected_mu])
+                if len(aligned) < expected_mu:
+                    aligned.extend([[] for _ in range(expected_mu - len(aligned))])
+                flat_distimes.extend(aligned)
+                inferred_from_distime.extend([g_idx] * expected_mu)
+        else:
+            for g_idx, mu_lists in enumerate(distime_blocks):
+                flat_distimes.extend(mu_lists)
+                inferred_from_distime.extend([g_idx] * len(mu_lists))
+        distime_raw = flat_distimes
+
+    if not mu_grid_index:
+        if inferred_from_pulse:
+            mu_grid_index = inferred_from_pulse
+        elif inferred_from_distime:
+            mu_grid_index = inferred_from_distime
+
+    return pulse_trains, distime_raw, mu_grid_index
+
+
+def _infer_total_samples_from_pulse(pulse_trains: Any) -> int | None:
+    """Infer the total sample count from a pulse-train matrix or cell layout."""
+    matrix = _coerce_pulse_matrix(pulse_trains)
+    if matrix is not None and matrix.ndim == 2 and matrix.size > 0:
+        return int(matrix.shape[1])
+    blocks = _extract_grid_pulse_blocks(pulse_trains)
+    if blocks:
+        return int(blocks[0].shape[1])
+    return None
+
+
+def _distimes_from_pulse_matrix(matrix: np.ndarray) -> list[list[int]]:
+    """Derive discharge-time indices from non-zero entries in a pulse matrix."""
+    return [np.flatnonzero(np.asarray(row) != 0).astype(int).tolist() for row in matrix]
+
+
+def _shift_distimes(values: list[list[int]], shift: int, limit: int) -> list[list[int]]:
+    """Shift all discharge times by a constant and clip to [0, limit)."""
+    shifted: list[list[int]] = []
+    for row in values:
+        adj = [int(v) + shift for v in row]
+        adj = [v for v in adj if 0 <= v < limit]
+        shifted.append(sorted(set(adj)))
+    return shifted
+
+
+def load_decomposition_file(filepath: str) -> LoadedDecomposition:
+    """Load a decomposition file (.npz or .mat) and normalize it for editing."""
+    ext = Path(filepath).suffix.lower()
+
+    if ext == ".npz":
+        d = _load_npz_decomp(filepath)
+    elif ext == ".mat":
+        d = _load_mat_decomp(filepath)
+    else:
+        raise ValueError("Unsupported decomposition format. Expected .mat or .npz")
+
+    pulse_trains, distime_raw, mu_grid_index = _unpack_gridwise_decomposition(
+        d.pulse_trains,
+        d.distime_raw,
+        d.mu_grid_index,
+    )
+
+    distimes = normalize_distimes(distime_raw)
+
+    grid_names = d.grid_names
+    if not grid_names:
+        grid_names = [
+            f"Grid {i + 1}" for i in range(max(mu_grid_index) + 1 if mu_grid_index else 1)
+        ]
+
+    total_samples = int(
+        d.total_samples or (pulse_trains.shape[1] if getattr(pulse_trains, "ndim", 0) == 2 else 0)
+    )
+    if total_samples <= 0 and distimes:
+        max_spike = max((max(x) for x in distimes if x), default=-1)
+        total_samples = max_spike + 1 if max_spike >= 0 else 0
+
+    if ext == ".mat" and distimes:
+        logger.info("Discharge times: 1-based (MAT export convention), shifting -1")
+        distimes = _shift_distimes(distimes, -1, int(total_samples))
+
+    pulse_matrix = np.asarray(_coerce_pulse_matrix(pulse_trains), dtype=float)
+    if not distimes:
+        distimes = _distimes_from_pulse_matrix(pulse_matrix)
+
+    if not mu_grid_index or len(mu_grid_index) != len(distimes):
+        mu_grid_index = [0] * len(distimes)
+
+    pulse_trains_full = [list(map(float, row)) for row in pulse_matrix.tolist()]
+
+    return LoadedDecomposition(
+        pulse_trains_full=pulse_trains_full,
+        distime_all=distimes,
+        fsamp=d.fsamp,
+        grid_names=grid_names,
+        total_samples=int(total_samples or 0),
+        mu_grid_index=mu_grid_index,
+        rois=d.rois,
+        parameters=d.parameters,
+        muscle=d.muscles,
+        sil=d.sil,
+    )
+
+
+def _parse_emgmask_cells(raw: Any) -> list[np.ndarray]:
+    """Parse EMGmask cell arrays into per-grid binary channel masks."""
+
+    def _parse_mask_item(item: Any) -> np.ndarray:
+        """Flatten one cell into a 1-D int array, preserving order and length."""
+        if item is None:
+            return np.array([], dtype=int)
+        if isinstance(item, np.ndarray):
+            if item.dtype == object:
+                return np.array([int(v) for v in item.flatten().tolist()], dtype=int)
+            try:
+                return np.asarray(item, dtype=int).flatten()
+            except (TypeError, ValueError):
+                logger.warning(
+                    "EMGmask ndarray could not be coerced to int (dtype=%s, "
+                    "shape=%s); treating as empty mask.",
+                    item.dtype,
+                    item.shape,
+                )
+                return np.array([], dtype=int)
+        if isinstance(item, (list, tuple)):
+            try:
+                return np.asarray([int(v) for v in item], dtype=int)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "EMGmask list/tuple could not be coerced to int (len=%d); "
+                    "treating as empty mask.",
+                    len(item),
+                )
+                return np.array([], dtype=int)
+        try:
+            return np.asarray([int(item)], dtype=int)
+        except (TypeError, ValueError):
+            logger.warning(
+                "EMGmask scalar could not be coerced to int (type=%s); treating as empty mask.",
+                type(item).__name__,
+            )
+            return np.array([], dtype=int)
+
+    items = _top_level_cell_items(raw)
+    if not items and isinstance(raw, np.ndarray) and raw.dtype != object:
+        if raw.ndim <= 1:
+            return [_parse_mask_item(raw)]
+        if raw.ndim == 2:
+            return [_parse_mask_item(raw[i]) for i in range(raw.shape[0])]
+
+    return [_parse_mask_item(item) for item in items]
+
+
+def _parse_signal_coordinates(raw: Any) -> list[np.ndarray]:
+    """Parse signal.coordinates into a list of (n_channels, 2) float arrays, one per grid."""
+    if raw is None:
+        return []
+    arr = np.asarray(raw)
+    if arr.dtype == object:
+        result = []
+        for c in arr.flatten():
+            c_arr = np.asarray(c, dtype=float)
+            if c_arr.ndim == 2 and c_arr.shape[0] == 2 and c_arr.shape[1] > 2:
+                c_arr = c_arr.T  # (2, n_chan) → (n_chan, 2)
+            if c_arr.ndim == 2:
+                result.append(c_arr)
+        return result
+    if arr.ndim == 3:
+        result = []
+        for i in range(arr.shape[0]):
+            c = arr[i].astype(float)
+            if c.shape[0] == 2 and c.shape[1] > 2:
+                c = c.T  # (2, n_chan) → (n_chan, 2)
+            result.append(c)
+        return result
+    if arr.ndim == 2:
+        c = arr.astype(float)
+        if c.shape[0] == 2 and c.shape[1] > 2:
+            c = c.T  # (2, n_chan) → (n_chan, 2)
+        return [c]
+    return []
+
+
+def _parse_signal_ied(raw: Any) -> list[float] | None:
+    """Parse signal.IED into a flat list of per-grid mm values."""
+    if raw is None:
+        return None
+    arr = np.asarray(raw, dtype=float).flatten()
+    return arr.tolist() if arr.size else None
+
+
+def _load_npz_signal_context(filepath: str) -> EditSignalContext | None:
+    """Extract raw EMG + artifact mask from a MUedit NPZ decomposition save."""
+    data = np.load(filepath, allow_pickle=True)
+    emg_raw = data.get("emg_data")
+    emg: np.ndarray | None = None
+    if isinstance(emg_raw, np.ndarray) and emg_raw.size > 0:
+        emg = np.asarray(emg_raw, dtype=float)
+        if emg.ndim == 1:
+            emg = emg.reshape(1, -1)
+        if emg.ndim != 2:
+            return None
+        if emg.shape[0] > emg.shape[1]:
+            emg = emg.T
+
+    fsamp_val = data.get("fsamp")
+    fsamp = float(np.asarray(fsamp_val).ravel()[0]) if fsamp_val is not None else None
+
+    grid_names = (
+        parse_text_list(data.get("grid_names")) if data.get("grid_names") is not None else []
+    )
+
+    discard_raw = data.get("discard_channels")
+    emgmask = _parse_emgmask_cells(discard_raw)
+
+    coordinates_raw = data.get("coordinates")
+    coordinates = _parse_signal_coordinates(coordinates_raw)
+
+    artifact_mask_raw = data.get("artifact_mask")
+    artifact_mask: np.ndarray | None = None
+    if artifact_mask_raw is not None:
+        artifact_mask = np.asarray(artifact_mask_raw, dtype=bool)
+
+    if emg is None and artifact_mask is None:
+        return None
+
+    return EditSignalContext(
+        data=emg if emg is not None else np.zeros((0, 0), dtype=float),
+        fsamp=fsamp or 0.0,
+        grid_names=grid_names,
+        emgmask=emgmask,
+        coordinates=coordinates,
+        artifact_mask=artifact_mask,
+    )
+
+
+def load_decomposition_signal_context(filepath: str) -> EditSignalContext | None:
+    """Best-effort extraction of raw EMG context embedded in decomposition files."""
+    ext = Path(filepath).suffix.lower()
+
+    if ext == ".npz":
+        return _load_npz_signal_context(filepath)
+    if ext != ".mat":
+        return None
+
+    signal: dict[str, Any] = {}
+    top: dict[str, Any] = {}
+    is_v73 = False
+    if h5py.is_hdf5(filepath):
+        is_v73 = True
+        with h5py.File(filepath, "r") as h5f:
+            if "signal" in h5f:
+                sig = mat73_read(h5f["signal"], h5f)
+                signal = sig if isinstance(sig, dict) else {}
+            for key in ("fsamp", "grid_names", "EMGmask", "emgmask", "metadata"):
+                if key in h5f:
+                    top[key] = mat73_read(h5f[key], h5f)
+    else:
+        mat = scipy.io.loadmat(filepath, simplify_cells=True)
+        top = mat if isinstance(mat, dict) else {}
+        candidate = top.get("signal")
+        signal = candidate if isinstance(candidate, dict) else {}
+
+    data = _get_case_insensitive(signal, "data")
+    if not isinstance(data, np.ndarray) or data.size == 0:
+        return None
+    data_arr = np.asarray(data, dtype=float)
+    if data_arr.ndim == 1:
+        data_arr = data_arr.reshape(1, -1)
+    if data_arr.ndim != 2:
+        return None
+    if is_v73:
+        data_arr = data_arr.T
+
+    fsamp_val = first_non_none(
+        _get_case_insensitive(signal, "fsamp"),
+        top.get("fsamp"),
+    )
+    fsamp = float(np.asarray(fsamp_val).ravel()[0]) if fsamp_val is not None else None
+
+    grid_names_raw = first_non_none(
+        _get_case_insensitive(signal, "gridname"),
+        top.get("grid_names"),
+    )
+    grid_names = parse_text_list(grid_names_raw)
+
+    emgmask_raw = first_non_none(
+        _get_case_insensitive(signal, "EMGmask", "emgmask"),
+        top.get("EMGmask"),
+        top.get("emgmask"),
+    )
+    emgmask = _parse_emgmask_cells(emgmask_raw)
+
+    coordinates_raw = _get_case_insensitive(signal, "coordinates")
+    coordinates = _parse_signal_coordinates(coordinates_raw)
+
+    ied_raw = first_non_none(
+        _get_case_insensitive(signal, "IED", "ied"),
+        top.get("IED"),
+        top.get("ied"),
+    )
+    ied = _parse_signal_ied(ied_raw)
+
+    aux_raw = _get_case_insensitive(signal, "auxiliary")
+    aux_data: np.ndarray | None = None
+    if isinstance(aux_raw, np.ndarray) and aux_raw.size > 0:
+        aux_arr = np.asarray(aux_raw, dtype=float)
+        if aux_arr.ndim == 1:
+            aux_arr = aux_arr.reshape(1, -1)
+        if aux_arr.ndim == 2:
+            if aux_arr.shape[0] > aux_arr.shape[1]:
+                aux_arr = aux_arr.T
+            aux_data = aux_arr
+
+    aux_names = parse_text_list(_get_case_insensitive(signal, "auxiliaryname"))
+
+    meta_raw = signal.get("metadata") or top.get("metadata") or {}
+    meta = meta_raw if isinstance(meta_raw, dict) else {}
+
+    return EditSignalContext(
+        data=data_arr,
+        fsamp=fsamp or 0.0,
+        grid_names=grid_names,
+        emgmask=emgmask,
+        coordinates=coordinates,
+        ied=ied,
+        aux_data=aux_data,
+        aux_names=aux_names,
+        loader_meta={key: meta[key] for key in LOADER_BIDS_META_KEYS if key in meta},
+    )

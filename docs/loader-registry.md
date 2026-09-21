@@ -8,8 +8,9 @@ This guide explains how to add a new raw-signal loader in MUedit.
 python/src/muedit/io/
   factory.py        ← extension→loader registry (entry point for all loading)
   loaders.py        ← thin re-exports only; do NOT add parsing logic here
-  _mat.py           ← MAT v5/v7.3 loader
+  mat.py            ← MAT v5/v7.3 loader (helpers shared with decomp/decomposition_file.py)
   _otb.py           ← OTB+ and OTB4 loaders
+  _intan.py         ← Intan RHD loader (all three save layouts)
   _bids_reader.py   ← BIDS (EDF/BDF) loader + grid-read helpers
   bids.py           ← BIDS export + re-exports of read helpers
 ```
@@ -18,10 +19,10 @@ python/src/muedit/io/
 
 Loader dispatch is registry-based in `python/src/muedit/io/factory.py`:
 
-- `register_loader(ext, loader, overwrite=False)` — register/override an extension
-- `get_loader(filepath)` — resolve the loader for a path (or a BIDS `emg/` directory)
+- `register_loader(ext, loader, *, overwrite=False)` — register/override an extension (`overwrite` is keyword-only)
+- `get_loader(filepath)` — resolve the loader for a path (or a BIDS/Intan recording directory)
 - `supported_extensions()` — list registered extensions
-- `load_signal(filepath)` — load and normalize to the internal mapping shape
+- `load_signal(filepath)` — load a file and return a `SignalImport`
 
 > The `LoaderFactory` class facade was removed in v2; call the module-level
 > functions above directly.
@@ -30,7 +31,9 @@ Loader dispatch is registry-based in `python/src/muedit/io/factory.py`:
 
 1. Create `python/src/muedit/io/_yourformat.py`.
    - Input: `filepath: str`
-   - Return: `dict` compatible with `SignalImport.from_mapping(...)` or `SignalImport`
+   - Return: a `SignalImport`, preferably built with `SignalImport.build(data=..., fsamp=..., ...)`
+     so the shared type coercion applies. A plain `dict` with the same keys also works;
+     `load_signal` converts it with `SignalImport.from_mapping(...)`.
 
 2. Re-export the loader from `python/src/muedit/io/loaders.py`:
    ```python
@@ -64,7 +67,6 @@ At minimum, ensure the loader output can be normalized to `SignalImport` fields:
 - `muscle`
 - `auxiliary`
 - `auxiliaryname`
-- `emgnotgrid`
 
 `metadata` is optional but recommended when available for a complient BIDS export.
 
@@ -73,8 +75,18 @@ At minimum, ensure the loader output can be normalized to `SignalImport` fields:
 `metadata` is a free-form `dict`, but these keys are what current backend logic
 uses during BIDS export and preview payload construction. The set of keys carried
 from a loaded decomposition through to BIDS export is defined once as
-`LOADER_BIDS_META_KEYS` in `python/src/muedit/decomp/io.py` — keep new keys in
+`LOADER_BIDS_META_KEYS` in `python/src/muedit/decomp/decomposition_file.py` — keep new keys in
 sync there.
+
+> **Wiring note:** all 15 keys are persisted to decomposition files via
+> `LOADER_BIDS_META_KEYS`, but not all flow from `loader_meta` to the BIDS
+> export call. `powerline_freq` and `units` are read from user-provided
+> `bids_entities` (settings panel) rather than from loader metadata, and
+> `recording_type` and `software_filters` are not passed from `loader_meta`
+> at all (they silently use export defaults). The remaining 11 keys
+> (`hardware_filters`, `gains`, `emg_hpf`, `emg_lpf`, `aux_gains`, `aux_hpf`,
+> `aux_lpf`, `aux_units`, `manufacturer`, `device_name`, `software_versions`)
+> are correctly wired from `loader_meta` to `export_bids_emg`.
 
 Required:
 - No metadata keys are strictly required for core decomposition to run.
@@ -91,6 +103,8 @@ Strongly recommended (per-channel filters and gains):
   - EMG low-pass cutoff(s).
 - `aux_gains` / `aux_hpf` / `aux_lpf`: `float | list[float]`
   - Auxiliary channel gains / cutoffs (if auxiliary channels exist).
+- `aux_units`: `str`
+  - Physical units of auxiliary channels (e.g. `"V"`). Defaults to `"a.u."` in BIDS export when not set.
 
 Recording-level fields (round-tripped to/from the BIDS `_emg.json` sidecar):
 - `manufacturer`: `str` — amplifier/system manufacturer.

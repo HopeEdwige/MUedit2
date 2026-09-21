@@ -1,5 +1,12 @@
 import { UNIFORM_PULSE_COLOR } from "../config.js";
 
+/** @typedef {import("../app/state.js").State} State */
+/** @typedef {ReturnType<typeof buildRunMuDropdownModel>} RunMuDropdownModel */
+/** @typedef {ReturnType<typeof buildRunMuExplorerModel>} RunMuExplorerModel */
+
+/**
+ * @param {{ state: State, getMuIndicesForGrid: (gridIdx: number) => number[] }} deps
+ */
 export function buildRunMuDropdownModel(deps) {
   const { state, getMuIndicesForGrid } = deps;
   const gridOptions = (state.gridNames || []).map((name, idx) => ({
@@ -34,6 +41,9 @@ export function buildRunMuDropdownModel(deps) {
   };
 }
 
+/**
+ * @param {{ state: State, fsamp?: number | null }} deps
+ */
 export function buildRunMuExplorerModel(deps) {
   const { state, fsamp = null } = deps;
   const allPulses = Array.isArray(state.muPulseTrains)
@@ -55,9 +65,6 @@ export function buildRunMuExplorerModel(deps) {
     !state.runView || (pulse && state.runView.end > pulse.length)
       ? { start: 0, end: pulse.length || 0 }
       : null;
-  const selectionOverlay = state.muSelectionRange
-    ? [state.muSelectionRange]
-    : [];
   const metaText =
     pulse && pulse.length ? `${spikes?.length || 0} discharge times` : "";
   const color = UNIFORM_PULSE_COLOR;
@@ -69,10 +76,9 @@ export function buildRunMuExplorerModel(deps) {
     spikes,
     view: nextView || view,
     nextView,
-    selectionOverlay,
     metaText,
     color,
     markerVals,
-    fsamp: Number.isFinite(fsamp) && fsamp > 0 ? fsamp : null,
+    fsamp: fsamp != null && Number.isFinite(fsamp) && fsamp > 0 ? fsamp : null,
   };
 }

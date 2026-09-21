@@ -1,10 +1,13 @@
 import {
+  ensureDiscardMasks,
+  setArtifactMode,
+  setArtifactRegions,
   setAuxData,
   setChannelMeans,
   setChannelTraceForGrid,
   setChannelTraces,
   setCoordinates,
-  setCurrentStage,
+  setDiscardMasks,
   setFsamp,
   setGridNames,
   setGridSeries,
@@ -17,22 +20,30 @@ import {
   setSeriesLength,
   setUploadToken,
 } from "../state/actions.js";
-import {
-  beginRawPreviewTransition,
-  rollbackRawPreviewTransition,
-} from "../state/transitions.js";
-import { roiStart, roiEnd } from "../state/selectors.js";
+import { getCurrentGrid, roiStart, roiEnd } from "../state/selectors.js";
+import { nextFrame } from "../view/plots.js";
+import { errorMessage } from "../app/services/error-service.js";
+import { toSpans } from "../api/payloads.js";
 
+/** @typedef {import("../app/context.js").App} App */
+/** @typedef {import("../app/state.js").State} State */
+/** @typedef {import("../app/state.js").ChannelTrace} ChannelTrace */
+/** @typedef {{ channel_index?: number, series: ChannelTrace }} QcChannel */
+
+/**
+ * @param {QcChannel[] | null | undefined} channels
+ * @returns {ChannelTrace[]}
+ */
 function channelsToEnv(channels) {
   return (Array.isArray(channels) ? channels : [])
     .sort((a, b) => (a.channel_index ?? 0) - (b.channel_index ?? 0))
-    .map((c) =>
-      Array.isArray(c.series)
-        ? c.series
-        : { min: c.min || [], max: c.max || [] },
-    );
+    .map((c) => c.series);
 }
 
+/**
+ * @param {State} state
+ * @param {number} nwin
+ */
 export function syncRois(state, nwin) {
   if (!state.rois) state.rois = [];
   if (state.rois.length > nwin) state.rois = state.rois.slice(0, nwin);
@@ -41,14 +52,75 @@ export function syncRois(state, nwin) {
   }
 }
 
-export async function requestQcGridWindow(
-  deps,
-  gridIdx,
-  start,
-  end,
-  targetPoints = 96,
-) {
-  const { state, api, renderChannelQC, setStatus } = deps;
+/**
+ * Run the automatic QC pipeline server-side and load the result into the
+ * interactive controls: detected bad channels replace the discard masks (click
+ * a cell to correct one) and detected artifacts replace the artifact windows
+ * (+/- to correct those). Nothing is sent to the decomposition here — the
+ * corrected masks travel with the run request.
+ */
+/** @param {App} app */
+export async function requestAutoQc(app) {
+  const {
+    state,
+    els,
+    api,
+    setStatus,
+    updateProgress,
+    renderChannelQC,
+    refreshVisuals,
+  } = app;
+
+  if (!state.uploadToken) {
+    setStatus("Load a signal first", "error");
+    return false;
+  }
+
+  if (els?.qcAutoBtn) els.qcAutoBtn.disabled = true;
+  updateProgress(undefined, "Running automatic QC...");
+  setStatus("Running automatic QC...", "muted");
+
+  try {
+    const data = await api.runAutoQc({ upload_token: state.uploadToken });
+    if (Array.isArray(data?.bad_channels_per_grid)) {
+      setDiscardMasks(state, data.bad_channels_per_grid);
+    }
+    setArtifactRegions(state, toSpans(data?.artifact_regions));
+    setArtifactMode(state, false);
+    setChannelTraces(state, []);
+
+    const nBad = (state.discardMasks || []).reduce(
+      (sum, grid) =>
+        sum + (grid || []).reduce((acc, v) => acc + (v ? 1 : 0), 0),
+      0,
+    );
+    const nArtifact = state.artifactRegions.length;
+
+    await renderChannelQC(false);
+    refreshVisuals();
+    updateProgress(
+      undefined,
+      `Automatic QC: ${nBad} bad channel(s), ${nArtifact} artifact window(s)`,
+    );
+    setStatus("Automatic QC complete", "success");
+    return true;
+  } catch (err) {
+    console.error(err);
+    setStatus(`Automatic QC failed: ${errorMessage(err)}`, "error");
+    return false;
+  } finally {
+    if (els?.qcAutoBtn) els.qcAutoBtn.disabled = false;
+  }
+}
+
+/**
+ * @param {App} app
+ * @param {number} gridIdx
+ * @param {number} [start]
+ * @param {number | null} [end]
+ */
+export async function requestQcGridWindow(app, gridIdx, start, end) {
+  const { state, api, renderChannelQC, setStatus } = app;
   const s = Number.isFinite(start) ? start : 0;
   const e = Number.isFinite(end) ? end : state.seriesLength;
 
@@ -62,14 +134,10 @@ export async function requestQcGridWindow(
       grid_index: gridIdx,
       start: s,
       end: e,
-      representation: state.qcRepresentation || "raw",
       target_fs: 1000,
-      target_points: targetPoints,
     };
 
-    const preferBinary =
-      (state.qcRepresentation || "raw") === "raw" &&
-      typeof api?.fetchQcWindow === "function";
+    const preferBinary = typeof api?.fetchQcWindow === "function";
     const data = await api.fetchQcWindow(requestPayload, { preferBinary });
     const env = channelsToEnv(data.channels);
     setChannelTraceForGrid(state, gridIdx, env);
@@ -79,51 +147,45 @@ export async function requestQcGridWindow(
   } catch (err) {
     console.error(err);
     if (typeof setStatus === "function") {
-      setStatus(`QC window update failed: ${err.message}`, "error");
+      setStatus(`QC window update failed: ${errorMessage(err)}`, "error");
     }
   } finally {
     setQcWindowLoadingForGrid(state, gridIdx, false);
   }
 }
 
-export async function requestPreview(deps, options = {}) {
+/**
+ * @param {App} app
+ * @param {{ silentFailure?: boolean, filepath?: string | null }} [options]
+ */
+export async function requestPreview(app, options = {}) {
   const { silentFailure = false, filepath = null } = options;
   const {
     state,
+    els,
     api,
     setUploadLoading,
     updateProgress,
     populateAuxSelector,
-    ensureDiscardMasks,
     populateGridTabs,
     requestQcGridWindow,
-    getCurrentGrid,
     enableRoiSelection,
     renderBidsAutoInfo,
     renderBidsMuscleFields,
     setStatus,
     showWorkspace,
-    nextFrame,
+    switchStage,
     refreshVisuals,
     renderChannelQC,
     applyPreviewMetadata,
-    getNwindows,
-    hideLanding,
-  } = deps;
+  } = app;
 
-  if (!state.file && !filepath) return;
+  if (!filepath) return false;
   setUploadLoading(true);
   updateProgress(0, "Fetching preview...");
 
   try {
-    let data;
-    if (filepath) {
-      data = await api.fetchPreviewByPath(filepath);
-    } else {
-      const formData = new FormData();
-      formData.append("file", state.file);
-      data = await api.fetchPreview(formData);
-    }
+    const data = await api.fetchPreviewByPath(filepath);
     setUploadToken(state, data.upload_token || null);
     setGridSeries(state, data.grid_mean_abs || []);
     setGridNames(state, data.grid_names || []);
@@ -136,21 +198,23 @@ export async function requestPreview(deps, options = {}) {
     setMuscle(state, data.muscle || []);
     setAuxData(state, data.auxiliary || [], data.auxiliary_names || []);
     setFsamp(state, data.fsamp);
-    if (applyPreviewMetadata) applyPreviewMetadata(data);
+    applyPreviewMetadata(data);
     setPreviewSeries(state, data.mean_abs || []);
     populateAuxSelector();
-    ensureDiscardMasks();
+    ensureDiscardMasks(state);
     populateGridTabs();
-    const nwin = getNwindows ? getNwindows() : 1;
+    const nwin = Number(els.nwindows?.value) || 1;
     const defaultEnd = state.seriesLength || 0;
     const rois = [];
     for (let i = 0; i < nwin; i++) {
       rois.push({ start: 0, end: defaultEnd });
     }
     setRois(state, rois);
+    setArtifactRegions(state, []);
+    setArtifactMode(state, false);
     const roiPreview = state.rois?.[0];
     await requestQcGridWindow(
-      getCurrentGrid(),
+      getCurrentGrid(state),
       roiStart(roiPreview),
       roiEnd(roiPreview, state.seriesLength),
     );
@@ -158,7 +222,7 @@ export async function requestPreview(deps, options = {}) {
     enableRoiSelection("auxCanvas");
     // Raw preview resets edit slice first; ensure BIDS rows render in QC context
     // so they source run grid names instead of edit fallback ("Grid 1").
-    setCurrentStage(state, "qc");
+    switchStage("qc");
     renderBidsAutoInfo();
     renderBidsMuscleFields();
 
@@ -168,7 +232,7 @@ export async function requestPreview(deps, options = {}) {
     await nextFrame();
     refreshVisuals();
     await renderChannelQC(true);
-    if (hideLanding) hideLanding();
+    els.landing?.classList.add("hidden");
     return true;
   } catch (err) {
     console.error(err);
@@ -181,65 +245,4 @@ export async function requestPreview(deps, options = {}) {
   } finally {
     setUploadLoading(false);
   }
-}
-
-export async function handleRawFile(deps, file, options = {}) {
-  const { silentPreviewFailure = false } = options;
-  const {
-    state,
-    resetBidsEntityDefaults,
-    requestPreview,
-    setStatus,
-    updateStartAvailability,
-  } = deps;
-
-  if (!file) return;
-  beginRawPreviewTransition(state, file);
-  resetBidsEntityDefaults(file.name);
-  setStatus("File ready");
-  updateStartAvailability();
-  const ok = await requestPreview({ silentFailure: silentPreviewFailure });
-  if (!ok) {
-    rollbackRawPreviewTransition(state);
-    updateStartAvailability();
-  }
-  return ok;
-}
-
-export async function handleLandingFile(deps, file) {
-  const {
-    setUploadLoading,
-    showUnsupportedUploadFormatError,
-    clearUploadFormatError,
-    isSupportedSignalFile,
-    detectLandingFileType,
-    handleRawFile,
-    handleDecompositionFile,
-  } = deps;
-
-  if (!file) return;
-  if (!isSupportedSignalFile(file)) {
-    setUploadLoading(false);
-    showUnsupportedUploadFormatError();
-    return;
-  }
-  clearUploadFormatError();
-  const kind = detectLandingFileType(file);
-  if (kind === "raw") {
-    await handleRawFile(file);
-    return;
-  }
-  if (kind === "decomposition") {
-    await handleDecompositionFile(file);
-    return;
-  }
-  if (kind === "ambiguous_mat") {
-    const rawOk = await handleRawFile(file, { silentPreviewFailure: true });
-    if (!rawOk) {
-      await handleDecompositionFile(file);
-    }
-    return;
-  }
-  setUploadLoading(false);
-  showUnsupportedUploadFormatError();
 }

@@ -1,9 +1,8 @@
 import {
   syncRois as syncRoisController,
+  requestAutoQc as requestAutoQcFeature,
   requestQcGridWindow as requestQcGridWindowFeature,
   requestPreview as requestPreviewFeature,
-  handleRawFile as handleRawFileFeature,
-  handleLandingFile as handleLandingFileFeature,
 } from "../../signal/qc.js";
 import {
   populateAuxSelector as populateAuxSelectorFeature,
@@ -17,175 +16,132 @@ import {
   rollbackRawPreviewTransition,
 } from "../../state/transitions.js";
 import { resetBidsEntityDefaults } from "../../view/bids-renderer.js";
+import {
+  removeLastArtifactRegion,
+  setArtifactMode,
+  setCurrentGrid,
+} from "../../state/actions.js";
+import { roiEnd, roiStart } from "../../state/selectors.js";
 
-export function createQcStageService(deps) {
-  const {
-    state,
-    els,
-    api,
-    drawMiniSeries,
-    drawGridOverlay,
-    setStatus,
-    updateProgress,
-    setUploadLoading,
-    showUnsupportedUploadFormatError,
-    clearUploadFormatError,
-    isSupportedSignalFile,
-    detectLandingFileType,
-    rawAndDecompositionExtensions,
-    ensureDiscardMasks,
-    populateGridTabs,
-    getCurrentGrid,
-    renderBidsAutoInfo,
-    renderBidsMuscleFields,
-    showWorkspace,
-    nextFrame,
-    updateStartAvailability,
-    resetBidsEntityDefaults: resetBidsEntityDefaultsFn,
-    applyPreviewMetadata,
-    getNwindows,
-    hideLanding,
-  } = deps;
+/** @typedef {import("../context.js").App} App */
+/** @typedef {import("../context.js").QcStage} QcStage */
 
+/**
+ * @param {App} app
+ * @returns {import("../context.js").QcStage}
+ */
+export function createQcStageService(app) {
+  const { state, els } = app;
+
+  /** @type {QcStage["populateAuxSelector"]} */
   function populateAuxSelector() {
     populateAuxSelectorFeature(els, state);
   }
 
+  /** @type {QcStage["renderAuxiliaryChannels"]} */
   function renderAuxiliaryChannels() {
     renderAuxiliaryChannelsFeature(els, state);
   }
 
+  /** @type {QcStage["requestQcGridWindow"]} */
   async function requestQcGridWindow(
     gridIdx,
     start = 0,
     end = state.seriesLength,
-    targetPoints = 96,
   ) {
-    return requestQcGridWindowFeature(
-      { state, api, renderChannelQC, setStatus },
-      gridIdx,
-      start,
-      end,
-      targetPoints,
-    );
+    return requestQcGridWindowFeature(app, gridIdx, start, end);
   }
 
+  /** @type {QcStage["requestPreview"]} */
   async function requestPreview(options = {}) {
-    return requestPreviewFeature(
-      {
-        state,
-        api,
-        setUploadLoading,
-        updateProgress,
-        populateAuxSelector,
-        ensureDiscardMasks,
-        populateGridTabs,
-        requestQcGridWindow,
-        getCurrentGrid,
-        enableRoiSelection,
-        renderBidsAutoInfo,
-        renderBidsMuscleFields,
-        setStatus,
-        showWorkspace,
-        nextFrame,
-        refreshVisuals,
-        renderChannelQC,
-        applyPreviewMetadata,
-        getNwindows,
-        hideLanding,
-      },
-      options,
-    );
+    return requestPreviewFeature(app, options);
   }
 
-  async function handleRawFile(file, options = {}) {
-    return handleRawFileFeature(
-      {
-        state,
-        resetBidsEntityDefaults: resetBidsEntityDefaultsFn,
-        requestPreview,
-        setStatus,
-        updateStartAvailability,
-      },
-      file,
-      options,
-    );
-  }
-
-  async function handleLandingFile(file, handleDecompositionFile) {
-    return handleLandingFileFeature(
-      {
-        setUploadLoading,
-        showUnsupportedUploadFormatError,
-        clearUploadFormatError,
-        isSupportedSignalFile: (input) =>
-          isSupportedSignalFile(input, rawAndDecompositionExtensions),
-        detectLandingFileType,
-        handleRawFile,
-        handleDecompositionFile,
-      },
-      file,
-    );
-  }
-
+  /** @type {QcStage["handleRawFilePath"]} */
   async function handleRawFilePath(path, name, options = {}) {
-    const syntheticFile = { name };
+    const syntheticFile = { name, path };
     beginRawPreviewTransition(state, syntheticFile);
     resetBidsEntityDefaults(els, name);
-    setStatus("File ready");
-    updateStartAvailability();
+    app.setStatus("File ready");
+    app.updateStartAvailability();
     const ok = await requestPreview({
       silentFailure: options.silentPreviewFailure ?? false,
       filepath: path,
     });
     if (!ok) {
       rollbackRawPreviewTransition(state);
-      updateStartAvailability();
+      app.updateStartAvailability();
     }
     return ok;
   }
 
+  /** @type {QcStage["renderChannelQC"]} */
   function renderChannelQC(waitForMiniPlots = false) {
-    return renderChannelQCController(
-      {
-        state,
-        els,
-        nextFrame,
-        drawMiniSeries,
-        requestQcGridWindow,
-        getCurrentGrid,
-        ensureDiscardMasks,
-      },
-      waitForMiniPlots,
-    );
+    return renderChannelQCController(app, waitForMiniPlots);
   }
 
+  /** @type {QcStage["enableRoiSelection"]} */
   function enableRoiSelection(canvasId) {
-    return enableRoiSelectionController(
-      {
-        state,
-        els,
-        syncRois,
-        refreshVisualsFn: refreshVisuals,
-        requestQcGridWindow,
-        updateProgress,
-      },
-      canvasId,
-    );
+    return enableRoiSelectionController(app, canvasId);
   }
 
+  /** @type {QcStage["refreshVisuals"]} */
   function refreshVisuals() {
-    refreshVisualsController({
-      state,
-      els,
-      drawGridOverlay,
-      renderAuxiliaryChannels,
-      renderMuExplorer: deps.renderMuExplorer,
-    });
+    refreshVisualsController(app);
   }
 
+  /** @type {QcStage["syncRois"]} */
   function syncRois(nwin) {
     syncRoisController(state, nwin);
+  }
+
+  /** @type {QcStage["runAutoQc"]} */
+  function runAutoQc() {
+    return requestAutoQcFeature(app);
+  }
+
+  /** Arm (or cancel) artifact selection for the next drag on the EMG plot. */
+  /** @type {QcStage["toggleArtifactMode"]} */
+  function toggleArtifactMode() {
+    setArtifactMode(state, !state.artifactMode);
+    refreshVisuals();
+    app.updateProgress(
+      undefined,
+      state.artifactMode
+        ? "Drag on the EMG plot to mark an artifact window"
+        : "Artifact selection cancelled",
+    );
+  }
+
+  /** @type {QcStage["removeLastArtifact"]} */
+  function removeLastArtifact() {
+    const removed = removeLastArtifactRegion(state);
+    setArtifactMode(state, false);
+    refreshVisuals();
+    const n = state.artifactRegions.length;
+    app.updateProgress(
+      undefined,
+      removed
+        ? `Artifact window removed (${n} left)`
+        : "No artifact windows to remove",
+    );
+  }
+
+  /** @type {QcStage["setSelectedGrid"]} */
+  function setSelectedGrid(idx) {
+    setCurrentGrid(state, idx);
+    const tabs = els.qcGridTabs?.querySelectorAll(".tab-btn") || [];
+    tabs.forEach((tab, i) => {
+      tab.classList.toggle("active", i === state.currentGrid);
+    });
+    renderChannelQC();
+    renderAuxiliaryChannels();
+    const roi = state.rois?.[0];
+    requestQcGridWindow(
+      state.currentGrid,
+      roiStart(roi),
+      roiEnd(roi, state.seriesLength),
+    );
   }
 
   return {
@@ -193,12 +149,14 @@ export function createQcStageService(deps) {
     renderAuxiliaryChannels,
     requestQcGridWindow,
     requestPreview,
-    handleRawFile,
-    handleLandingFile,
     handleRawFilePath,
     renderChannelQC,
     enableRoiSelection,
     refreshVisuals,
     syncRois,
+    runAutoQc,
+    toggleArtifactMode,
+    removeLastArtifact,
+    setSelectedGrid,
   };
 }

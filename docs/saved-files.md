@@ -30,20 +30,26 @@ Core NPZ keys (aligned with web-app save format):
 - `fsamp`
 - `grid_names`
 - `mu_grid_index`
-- `muscle_names`
 - `muscle`
 - `total_samples`
 - `parameters`
 - `adaptive_losses`
 
+Additional keys always written:
+- `sil` — silhouette score per MU
+- `sil_keys` — window keys for the `sil_by_window` mapping
+- `sil_by_window` — per-window SIL scores
+- `rois` — list of `(start, end)` analysis windows
+
 Conditional key:
 - `emg_data` (included only when BIDS export is not requested)
 - `discard_channels` (included only when BIDS export is not requested)
 - `coordinates` (included only when BIDS export is not requested)
+- `artifact_mask` (included whenever an artifact mask was applied, with or without BIDS export)
 
 Notes:
 - CLI decomposition uses `save_npz=True` by default.
-- API decomposition persists this file only when `persist_output=true` is set on the request.
+- API decomposition persists this file when `persist_output=true` is set on the request or BIDS export is requested (then under `derivatives/muedit/.../decomp/`, see below).
 
 ## 2) BIDS Export During Decomposition
 
@@ -124,9 +130,12 @@ validator by `.bidsignore`):
 
 ```text
 <bids_root>/derivatives/muedit/
-  dataset_description.json                        # created if missing
   sub-<subject>/[ses-<session>/]decomp/<entity>_decomp.npz
 ```
+
+> The derivatives-level `dataset_description.json` under
+> `derivatives/muedit/` is **not** written by the decomposition pipeline — it
+> is created only during the edited-save flow (see §3 below).
 
 BIDS decomposition NPZ keys (same core schema):
 - `pulse_trains`
@@ -134,7 +143,6 @@ BIDS decomposition NPZ keys (same core schema):
 - `fsamp`
 - `grid_names`
 - `mu_grid_index`
-- `muscle_names`
 - `muscle`
 - `total_samples`
 - `parameters`
@@ -155,11 +163,11 @@ Primary outputs:
 Best-effort BIDS-facing side outputs (failures never block the primary save):
 
 ```text
-<bids_root>/dataset_description.json                                   # created/updated
+<bids_root>/dataset_description.json                                   # created if missing
 <bids_root>/participants.tsv | participants.json                      # subject row upserted from the form
 <bids_root>/sub-<subject>/[ses-<session>/]emg/<entity>_*              # raw EMG sidecars re-exported (see §2)
 <bids_root>/derivatives/muedit/sub-<subject>/[ses-<session>/]emg/
-    <entity>_desc-decomposition_events.tsv                            # one row per MU spike (onset/sample/unit_id)
+    <entity>_desc-decomposition_events.tsv                            # one row per MU spike (onset, duration, sample, unit_id, description)
     <entity>_desc-decomposition_events.json
 ```
 
@@ -172,10 +180,12 @@ Edited NPZ keys:
 - `fsamp`
 - `grid_names`
 - `mu_grid_index`
-- `muscle_names`
 - `muscle`
 - `parameters`
 - `total_samples`
+
+Conditional key:
+- `artifact_mask` (included only when artifact regions are provided)
 
 ### Edit Log Sidecar
 
@@ -237,20 +247,23 @@ The sidecar contains:
       "timestamp": "2026-04-16T14:36:00.000Z",
       "flagged": true
     }
-  ]
+  ],
+  "artifact_times": [[7200, 9100], [], []]
 }
 ```
 
-**`mu_uids`** — one stable string ID per surviving MU (after flagged/duplicate removal), in the same order as `discharge_times`. Format: `g<grid_index>_mu<rank_within_grid>`. Assigned once at first load; preserved through successive saves.
+**`mu_uids`** — one stable string ID per surviving MU (after flagged/duplicate removal), in the same order as `discharge_times`. Format: `g<grid_index>_mu<rank_within_grid>`. Assigned once at first load; preserved through successive saves. A uid is never reused: a new MU from `duplicate_mu` is numbered after every uid the history has ever named, including removed ones.
 
 **`history`** — append-only log of all edit actions across all sessions. Carries over when the file is saved and reloaded for further editing.
+
+**`artifact_times`** — present when any MU has artifact markers. A list of lists — one entry per MU — containing the sample indices of all peaks marked as artifacts. Restored automatically on reload.
 
 Action types and their fields. Every entry also carries a `type` and an ISO-8601
 `timestamp`; fields marked `?` are present only when non-empty.
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `add_spikes` | `mu_uid`, `spikes_added`? | Spikes added over a region of interest. |
+| `add_spikes` | `mu_uid`, `spikes_added`?, `spikes_removed`? | Spikes added over a region of interest; `spikes_removed` captures any net removals. |
 | `delete_spikes` | `mu_uid`, `spikes_removed`? | Spikes removed over a region of interest. |
 | `delete_dr` | `mu_uid`, `spikes_added`?, `spikes_removed`? | Discharge-rate-based edit. |
 | `add_artifact` | `mu_uid`, `artifacts_added`? | Artifact times added (separate channel from spikes). |
@@ -258,8 +271,13 @@ Action types and their fields. Every entry also carries a `type` and an ISO-8601
 | `update_filter` | `mu_uid`, `view_start`, `view_end`, `use_peeloff`, `lock_spikes`, `spikes_added`?, `spikes_removed`? | Filter re-estimation over `[view_start, view_end)`; `spikes_*` capture the net change. |
 | `remove_outliers` | `mu_uid`, `spikes_removed`? | Automatic outlier-spike removal. |
 | `duplicate_mu` | `mu_uid`, `source_mu_uid` | `mu_uid` is the **new** MU; `source_mu_uid` is the one it was copied from. |
-| `remove_duplicates` | `removed_count`, `removed_mu_uids` | Multi-MU action — no single `mu_uid`. |
+| `remove_duplicates` | `removed_count`, `removed_mu_uids`, `on_save`? | Multi-MU action — no single `mu_uid`. `on_save: true` when the save itself removed them. |
 | `flag_mu` | `mu_uid`, `flagged` | `flagged: true` marks the MU for deletion. |
+| `remove_flagged` | `removed_count`, `removed_mu_uids`, `on_save` | Flagged MUs dropped when the file was saved. |
+| `reset_mu` | `mu_uid`, `spikes_added`?, `spikes_removed`?, `artifacts_removed`?, `flagged`? | The MU was reset to its loaded state; the fields record what the reset changed. |
+
+Undo removes the entries of the action it undoes, so the history always describes
+the saved data.
 
 All spike, artifact, and view coordinates are 0-based sample indices (same units
 as `discharge_times`).

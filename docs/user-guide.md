@@ -12,6 +12,8 @@ Import signal  →  Quality Check / Region Of Interest  →  Decompose  →  Edi
 
 Each step is represented by a button in the top navigation bar. Steps unlock progressively as data becomes available.
 
+App-wide messages (connecting to the backend, errors, save confirmations) appear at the top right of the navigation bar; hover over a shortened message to read it in full. Edit-stage messages appear under the edit toolbar.
+
 ---
 
 ## Step 1 — Import
@@ -23,12 +25,15 @@ Each step is represented by a button in the top navigation bar. Steps unlock pro
 | MATLAB | `.mat` | v5 and v7.3 (HDF5) |
 | OT Biolab+ | `.otb+` | Archive with XML + `.sig` |
 | OT Biolab 4 | `.otb4` | Proprietary binary |
+| Intan RHD | `.rhd` | Single-file or directory (all three save layouts) |
 | BIDS EMG | `.bdf`, `.edf` | Requires a `*_channels.tsv` sidecar (legacy `*_emg_channels.tsv` also accepted) |
 | Decomposition | `.npz` | Saved decomposition — goes straight to Edit |
 
 ### Loading a file
 
 Click the folder icon in the landing page to browse.
+
+**Intan RHD recordings:** point to the `.rhd` file or the recording directory. The loader supports all three Intan save layouts (traditional single-file, one file per channel, one file per signal type). Amplifier channels are grouped into one grid per port in header order. Grid identity is resolved from a `muedit_grids.json` sidecar beside the recording (if present), or defaulted for 64-channel ports. Auxiliary, supply, board-ADC, and digital I/O channels are returned alongside the EMG data.
 
 **BIDS recordings:** point to either the `*_emg.bdf/.edf` file or the `emg/` directory. MUedit reads all grids and auxiliary channels defined in the `*_channels.tsv` sidecar automatically.
 
@@ -44,9 +49,13 @@ This stage lets you inspect signal quality and define which part of the recordin
 
 Each electrode on the grid is shown as a tile. Channels can be toggled to exclude them from decomposition.
 
+**Automatic QC:** press the **Automatic QC** button (sparkle icon, next to the grid tabs) to run the server-side QC pipeline. It detects bad channels (flat, saturated, quantized, noisy, low-SNR, intermittent, contact-loss) and artifact-contaminated time regions automatically. Detected bad channels replace the current discard masks — click individual tiles to override. Detected artifact regions populate the artifact windows list (see below). Nothing is committed yet; you can review and correct the results before decomposing.
+
 ### Average EMG Activity chart
 
 Displays the rectified average across all active channels. Use this to identify the contraction window you want to decompose.
+
+**Artifact windows:** use the **+** button (top-right of the chart card) to arm artifact selection, then drag on the chart to mark a time region as an artifact. Marked windows are shaded on the chart. Use the **-** button to remove the last window. The count next to the buttons shows how many windows are active. Artifact windows are excluded from decomposition filter updates and state propagation — they prevent transient noise from corrupting the separation. These windows are combined with any automatically detected artifacts (from the Automatic QC button) and travel with the decomposition request.
 
 ### Auxiliary Channels panel
 
@@ -75,7 +84,7 @@ Open the sidebar with the hamburger button (top-left). It contains three collaps
 
 The panel also exposes optional **participant** (age, sex, handedness) and
 **acquisition/hardware** metadata (manufacturer, device model, powerline
-frequency, placement scheme, task description). These are written to the BIDS
+frequency, placement scheme). These are written to the BIDS
 `participants.tsv` and `_emg.json` sidecars on save, and pre-filled from those
 files (or from auto-detected loader metadata) when you reopen a recording.
 Electrode details (type, material, inter-electrode distance) are derived
@@ -97,8 +106,7 @@ automatically from the grid model name and do not need to be entered.
 | Analysis windows | Number of analysis windows (default 1) |
 | Duplicates thresh | Cross-correlation threshold for duplicate removal (0–1, default 0.3) |
 | Peeloff | Toggle peeloff; set window in ms (default 25 ms) |
-| Use adaptive | Toggle adaptive decomposition mode |
-| Full trace | Apply MU filters over the entire EMG trace instead of only the decomposed windows |
+| Post-processing | Mode for applying MU filters after decomposition: **Windowed** (default — filters applied only over the decomposed windows), **Full trace** (apply over the entire EMG trace), or **Adaptive** (use adaptive online post-processing) |
 
 **Quality Filters** (applied after decomposition)
 
@@ -139,14 +147,14 @@ Use the **Grid** and **Motor Unit** dropdowns, or the keyboard shortcuts `<` (pr
 |---|---|---|
 | Add Spike | `A` | Activate add mode, then drag a box on the pulse train to add spikes within the selection |
 | Add Artifact | `X` | Activate artifact mode, then drag a box to mark a peak as an artifact (see below) |
-| Delete Spike | `D` | Activate delete mode, then drag a box (or click) to remove both spikes and artifact markers within the selection |
+| Delete Spike/Artifact | `D` | Activate delete mode, then drag a box (or click) to remove both spikes and artifact markers within the selection |
 | Remove Outliers | `R` | Automatically remove spikes with abnormally high discharge rates |
 | Update Filter | `Space` | Recompute the MU filter from the BIDS EMG signal over the current view window |
 | Peel-off | `P` | Toggle peel-off for filter updates (see below) |
 | Lock Spikes | `L` | Toggle spike-locking for filter updates — preserves your existing spikes when recomputing the filter (see below) |
 | Flag MU | — | Mark the current MU for deletion — it will be excluded when saving |
 | Duplicate MU | — | Create an identical copy of the current MU in the same grid (same pulse train and discharge times) — intended as a starting point for separating two merged units |
-| Remove Duplicates | — | Run duplicate detection across all grids immediately: pairs whose lag-corrected spike overlap exceeds the **Duplicates thresh** setting are deduplicated, keeping the unit with the lowest inter-spike interval variability |
+| Remove Duplicates | — | Run duplicate detection immediately, exactly as the decomposition does: within each grid and then across grids (unless the decomposition's parameters set `duplicatesbgrids` to false), pairs whose lag-corrected spike overlap exceeds the **Duplicates thresh** setting are deduplicated, keeping the unit with the lowest inter-spike interval variability |
 | Undo | — | Undo the last edit on the current MU |
 | Reset | — | Revert all edits on the current MU to the original decomposition values |
 | Save | — | Write the edited decomposition to disk |
@@ -187,7 +195,7 @@ The `.npz` contains the corrected pulse trains. The `.json` sidecar contains a f
 
 Each save also refreshes the **BIDS events file** (`<entity>_desc-decomposition_events.tsv`, with a companion `.json`): a standards-compliant representation of the motor-unit discharges, with one row per spike (onset, sample index, and unit ID). It is regenerated from the current edits every time you save, so it always reflects the latest corrected spike trains. Saving additionally upserts the subject row in `participants.tsv`; see [saved-files.md](saved-files.md) for the full file list.
 
-Flagged MUs are removed on save. Duplicate MUs are also removed on save: pairs whose lag-corrected spike overlap exceeds the **Duplicates thresh** setting (default 0.3) are considered duplicates, and only the one with the lowest inter-spike interval variability is kept. You can also trigger deduplication at any point during editing using the **Remove Duplicates** button.
+Flagged MUs are removed on save. Duplicate MUs are also removed on save, with the same rules as the decomposition (within each grid, then across grids unless `duplicatesbgrids` is false): pairs whose lag-corrected spike overlap exceeds the **Duplicates thresh** setting (default 0.3) are considered duplicates, and only the one with the lowest inter-spike interval variability is kept. An MU copied with **Duplicate MU** is therefore removed on save unless you have edited it enough to fall below the threshold. The edit history records every MU removed on save (`remove_flagged` and `remove_duplicates` entries with `on_save: true`), and the editor drops them too so it matches the saved file. You can also trigger deduplication at any point during editing using the **Remove Duplicates** button.
 
 ---
 
@@ -204,7 +212,7 @@ Written after decomposition or after saving edits. Core arrays:
 | `fsamp` | Sampling frequency (Hz) |
 | `grid_names` | Grid labels |
 | `mu_grid_index` | Grid assignment for each MU |
-| `muscle_names` | Muscle label(s) |
+| `muscle` | Muscle label(s) |
 | `total_samples` | Total recording length in samples |
 | `parameters` | Decomposition parameters used |
 
@@ -232,8 +240,10 @@ Additional history action types:
 |---|---|---|
 | `add_artifact` | `mu_uid`, `artifacts_added` | One or more peaks were marked as artifacts; `artifacts_added` lists the sample indices |
 | `duplicate_mu` | `mu_uid`, `source_mu_uid` | A new MU was created as a copy of `source_mu_uid` |
-| `remove_duplicates` | `removed_count`, `removed_mu_uids` | Deduplication was run; lists the UIDs that were removed |
+| `remove_duplicates` | `removed_count`, `removed_mu_uids`, `on_save`? | Deduplication was run; lists the UIDs that were removed. `on_save: true` when the save removed them |
 | `flag_mu` | `mu_uid`, `flagged` | A MU was flagged (`true`) or unflagged (`false`) for deletion |
+| `remove_flagged` | `removed_count`, `removed_mu_uids`, `on_save` | Flagged MUs were removed when the file was saved |
+| `reset_mu` | `mu_uid`, `spikes_added`, `spikes_removed`, `artifacts_removed`, `flagged` | **Reset** returned the MU to its loaded state; lists what the reset changed (`flagged: false` if it cleared a flag) |
 
 ---
 
@@ -285,4 +295,6 @@ so you can confirm the dataset is fully compliant before distribution.
 | Update Filter fails | Ensure the **Project** field is set and the original EMG file is accessible |
 | Save fails | Check the **Project** field is set — output is written to `data/<project>/` |
 | Port already in use | Set `MUEDIT_BACKEND_PORT` / `MUEDIT_FRONTEND_PORT` to free ports before launching |
+| "Backend unreachable — please restart the app" | The Python backend is not running or crashed; stop and relaunch MUedit (`MUedit.command` / `MUedit.bat`, or `scripts/run_MUedit.sh` / `.ps1`) |
+| "Session expired, reloading file..." during a run | The backend lost its cached copy of the signal (e.g. after a restart); MUedit reloads the file from its original path and retries once. If the file was moved, reopen it |
 | Browser does not open | Navigate manually to `http://localhost:8080` (or the port shown in the terminal) |

@@ -1,49 +1,82 @@
-export function createFileSessionService(deps) {
-  const { els } = deps;
+/**
+ * The session form: file-type detection, the upload indicator, and the BIDS
+ * entity, participant and hardware fields that travel with a run or a save.
+ * Every DOM read or write of those fields goes through here.
+ */
+import {
+  applyParticipantFields,
+  applySessionInfoToDom,
+  renderBidsAutoInfo as renderBidsAutoInfoView,
+  renderBidsMuscleFields as renderBidsMuscleFieldsView,
+} from "../../view/bids-renderer.js";
+import {
+  buildBidsAutoInfoModel,
+  buildBidsMuscleRowsModel,
+  buildEntityLabelFromSession,
+  buildSessionInfoFromDecomposition,
+  listifyMuscles,
+  parseBidsEntitiesFromLabel,
+} from "../../io/bids.js";
+import {
+  setEditProject,
+  setEditSoftwareVersions,
+  setFsamp,
+  setMuscle,
+} from "../../state/actions.js";
 
+/** @typedef {import("../context.js").App} App */
+/** @typedef {import("../context.js").FileSessionService} FileSessionService */
+
+/**
+ * @param {App} app
+ * @returns {import("../context.js").FileSessionService}
+ */
+export function createFileSessionService(app) {
+  const { els, state, api } = app;
+
+  /** @type {FileSessionService["getBidsProject"]} */
   function getBidsProject() {
     return (els.bidsProject?.value || "").trim();
   }
 
+  /** @type {FileSessionService["getBidsMuscleNames"]} */
   function getBidsMuscleNames() {
-    const inputs =
-      els.bidsMuscleContainer?.querySelectorAll(".bids-muscle-input");
+    const inputs = /** @type {NodeListOf<HTMLInputElement> | undefined} */ (
+      els.bidsMuscleContainer?.querySelectorAll(".bids-muscle-input")
+    );
     if (!inputs?.length) return [];
     return Array.from(inputs)
       .map((input) => String(input.value || "").trim())
       .filter(Boolean);
   }
 
+  /** @type {FileSessionService["clearUploadFormatError"]} */
   function clearUploadFormatError() {
     if (!els.uploadFormatError) return;
     els.uploadFormatError.textContent = "";
     els.uploadFormatError.classList.add("hidden");
   }
 
+  /** @type {FileSessionService["showUnsupportedUploadFormatError"]} */
   function showUnsupportedUploadFormatError() {
     if (!els.uploadFormatError) return;
     els.uploadFormatError.textContent =
-      "Accepted: raw (.mat, .otb+, .otb4, .bdf, .edf) or decomposition (.npz, .mat)";
+      "Accepted: raw (.mat, .otb+, .otb4, .bdf, .edf, .rhd) or decomposition (.npz, .mat)";
     els.uploadFormatError.classList.remove("hidden");
   }
 
-  function isSupportedSignalFile(file, extensions) {
-    const name = (file?.name || "").toLowerCase();
-    return (
-      extensions.raw.some((ext) => name.endsWith(ext)) ||
-      extensions.decomposition.some((ext) => name.endsWith(ext))
-    );
-  }
-
+  /** @type {FileSessionService["detectLandingFileType"]} */
   function detectLandingFileType(file) {
     const name = (file?.name || "").toLowerCase();
     if (name.endsWith(".otb+") || name.endsWith(".otb4")) return "raw";
     if (name.endsWith(".bdf") || name.endsWith(".edf")) return "raw";
+    if (name.endsWith(".rhd")) return "raw";
     if (name.endsWith(".npz")) return "decomposition";
     if (name.endsWith(".mat")) return "ambiguous_mat";
     return "unsupported";
   }
 
+  /** @type {FileSessionService["setUploadLoading"]} */
   function setUploadLoading(active) {
     if (!els.uploadLoader) return;
     els.uploadLoader.classList.toggle("hidden", !active);
@@ -51,6 +84,7 @@ export function createFileSessionService(deps) {
 
   // Raw BIDS entity inputs (subject/task/session/run) used to compose the
   // entity label. Returned untransformed so the caller owns label assembly.
+  /** @type {FileSessionService["getBidsEntityInputs"]} */
   function getBidsEntityInputs() {
     return {
       subject: els.bidsSubject?.value,
@@ -64,6 +98,7 @@ export function createFileSessionService(deps) {
   // Gather the participant + hardware BIDS form fields into the snake_case
   // shape the /edit/save endpoint expects, ready to spread into the request
   // body. Keeps all save-form DOM reads here rather than in the orchestrator.
+  /** @type {FileSessionService["getBidsSaveFields"]} */
   function getBidsSaveFields() {
     const age = String(els.bidsParticipantAge?.value || "").trim();
     const sex = String(els.bidsParticipantSex?.value || "").trim();
@@ -91,13 +126,12 @@ export function createFileSessionService(deps) {
       ),
       placement_scheme_description:
         String(els.bidsPlacementDescription?.value || "").trim() || null,
-      task_description:
-        String(els.bidsTaskDescription?.value || "").trim() || null,
     };
   }
 
   // Gather all BIDS entity fields from the DOM into the snake_case shape the
   // decompose endpoint expects. Centralizes DOM reads for the run payload.
+  /** @type {FileSessionService["collectBidsEntities"]} */
   function collectBidsEntities() {
     const entities = {};
     const subject = String(els.bidsSubject?.value || "").trim();
@@ -122,9 +156,119 @@ export function createFileSessionService(deps) {
       els.bidsPlacementDescription?.value || "",
     ).trim();
     if (placementDesc) entities.placement_scheme_description = placementDesc;
-    const taskDescription = String(els.bidsTaskDescription?.value || "").trim();
-    if (taskDescription) entities.task_description = taskDescription;
+
+    const age = String(els.bidsParticipantAge?.value || "").trim();
+    const sex = String(els.bidsParticipantSex?.value || "").trim();
+    const handedness = String(
+      els.bidsParticipantHandedness?.value || "",
+    ).trim();
+    if (age || sex || handedness) {
+      entities.participant_meta = {
+        age: age || "n/a",
+        sex: sex || "n/a",
+        handedness: handedness || "n/a",
+      };
+    }
+
     return entities;
+  }
+
+  /** @type {FileSessionService["setBidsEntitiesInput"]} */
+  function setBidsEntitiesInput(entities) {
+    if (els.bidsSubject && entities.subject)
+      els.bidsSubject.value = entities.subject;
+    if (els.bidsTask && entities.task) els.bidsTask.value = entities.task;
+    if (els.bidsSession && entities.session)
+      els.bidsSession.value = entities.session;
+    if (els.bidsAcquisition && entities.acq)
+      els.bidsAcquisition.value = entities.acq;
+    if (els.bidsRun && entities.run) els.bidsRun.value = entities.run;
+    if (els.bidsProject && entities.project) {
+      els.bidsProject.value = entities.project;
+      setEditProject(state, entities.project);
+    }
+  }
+
+  /** @type {FileSessionService["applyPreviewMetadata"]} */
+  function applyPreviewMetadata(data) {
+    if (els.fsamp) {
+      const fs = Number(data.fsamp);
+      els.fsamp.value =
+        Number.isFinite(fs) && fs > 0 ? String(Math.round(fs)) : "";
+    }
+    applyParticipantFields(els, data?.participant_meta || {});
+    if (els.bidsManufacturer && data?.manufacturer)
+      els.bidsManufacturer.value = data.manufacturer;
+    if (els.bidsDeviceModel && data?.manufacturers_model_name)
+      els.bidsDeviceModel.value = data.manufacturers_model_name;
+  }
+
+  /** @type {FileSessionService["applySessionInfoFromDecomposition"]} */
+  function applySessionInfoFromDecomposition(file, data = {}) {
+    const payload = buildSessionInfoFromDecomposition(file, data, {
+      parseBidsEntitiesFromLabel,
+      listifyMuscles,
+    });
+    applySessionInfoToDom(els, payload);
+    setMuscle(state, payload.muscles);
+    setEditSoftwareVersions(state, payload.bids?.softwareVersions ?? null);
+    setFsamp(state, payload.fsampText);
+  }
+
+  /** @type {FileSessionService["renderBidsAutoInfo"]} */
+  function renderBidsAutoInfo() {
+    const model = buildBidsAutoInfoModel(state);
+    renderBidsAutoInfoView(els, model);
+    // Pre-fill editable hardware fields from loader metadata when empty.
+    if (model && !model.hidden) {
+      if (
+        els.bidsManufacturer &&
+        !els.bidsManufacturer.value &&
+        model.manufacturer
+      )
+        els.bidsManufacturer.value = model.manufacturer;
+      if (els.bidsDeviceModel && !els.bidsDeviceModel.value && model.deviceName)
+        els.bidsDeviceModel.value = model.deviceName;
+      const meta = state.metadata || {};
+      if (
+        els.bidsPowerlineFreq &&
+        !els.bidsPowerlineFreq.value &&
+        meta.powerline_freq
+      )
+        els.bidsPowerlineFreq.value = String(meta.powerline_freq);
+    }
+  }
+
+  /** @type {FileSessionService["renderBidsMuscleFields"]} */
+  function renderBidsMuscleFields() {
+    renderBidsMuscleFieldsView(els, buildBidsMuscleRowsModel(state));
+  }
+
+  /** @type {FileSessionService["persistNpzBySaveTarget"]} */
+  async function persistNpzBySaveTarget(payload, fallbackName) {
+    const { subject, task, session, run, acquisition } = getBidsEntityInputs();
+    const entityLabel =
+      buildEntityLabelFromSession({
+        subject,
+        task,
+        session,
+        run,
+        acq: acquisition,
+      }) || payload.entity_label;
+
+    const data = await api.editSave({
+      ...payload,
+      file_label: payload.file_label || fallbackName || "decomposition.npz",
+      entity_label: entityLabel,
+      ...getBidsSaveFields(),
+    });
+    app.setStatus("Saved", "success");
+    return {
+      mode: "saved",
+      path: data.path || "",
+      keptIndices: data.kept_indices,
+      editHistory: data.edit_history,
+    };
   }
 
   return {
@@ -133,9 +277,14 @@ export function createFileSessionService(deps) {
     getBidsEntityInputs,
     getBidsSaveFields,
     collectBidsEntities,
+    setBidsEntitiesInput,
+    applyPreviewMetadata,
+    applySessionInfoFromDecomposition,
+    renderBidsAutoInfo,
+    renderBidsMuscleFields,
+    persistNpzBySaveTarget,
     clearUploadFormatError,
     showUnsupportedUploadFormatError,
-    isSupportedSignalFile,
     detectLandingFileType,
     setUploadLoading,
   };

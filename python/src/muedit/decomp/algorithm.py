@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
+
 import numpy as np
 from scipy.linalg import eigh, inv
 
+from muedit.decomp.types import ContrastFunc
+from muedit.models import BoolArray, FloatArray, IntArray
 from muedit.signal.decomp_primitives import (
     DECOMP_MIN_ISI_SEC,
+    POSTPROC_MIN_ISI_SEC,
     extend_signal,
     find_refractory_peaks,
     isi_cov,
@@ -14,8 +20,10 @@ from muedit.signal.decomp_primitives import (
     split_by_amplitude,
 )
 
+logger = logging.getLogger(__name__)
+
 _FIXED_POINT_TOL = 1e-4
-_FIXED_POINT_MAXITER = 500
+FIXED_POINT_MAXITER = 500
 _MIN_ISI_SEC = DECOMP_MIN_ISI_SEC
 _KMEANS_ITER = 10
 DEDUP_MAXLAG_RATIO: int = 40
@@ -24,6 +32,7 @@ DEDUP_JITTER: float = 0.00025
 __all__ = [
     "DEDUP_JITTER",
     "DEDUP_MAXLAG_RATIO",
+    "FIXED_POINT_MAXITER",
     "batch_process_filters",
     "compute_silhouette",
     "extend_signal",
@@ -37,7 +46,7 @@ __all__ = [
 ]
 
 
-def pca_extended_signal(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def pca_extended_signal(signal: FloatArray) -> tuple[FloatArray, FloatArray]:
     """Estimate PCA basis/eigenvalues for extended signal whitening."""
     cov_matrix = np.cov(signal, bias=True)
     eigenvalues, eigenvectors = eigh(cov_matrix)
@@ -48,8 +57,6 @@ def pca_extended_signal(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     n_eigs = len(eigenvalues)
     rank_tolerance = np.mean(eigenvalues[n_eigs // 2 :])
-    if rank_tolerance < 0:
-        rank_tolerance = 0
 
     max_last_eig = np.sum(eigenvalues > rank_tolerance)
     if 0 < max_last_eig < signal.shape[0]:
@@ -69,35 +76,33 @@ def pca_extended_signal(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def whiten_extended_signal(
-    signal: np.ndarray,
-    eigenvectors: np.ndarray,
-    eigenvalues_diag: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Whiten extended signal and return whitening/dewhitening matrices."""
-    sqrt_d = np.sqrt(eigenvalues_diag)
-    inv_sqrt_d = inv(sqrt_d)
+    signal: FloatArray,
+    eigenvectors: FloatArray,
+    eigenvalues_diag: FloatArray,
+) -> tuple[FloatArray, FloatArray]:
+    """Whiten extended signal and return the whitening matrix."""
+    inv_sqrt_d = inv(np.sqrt(eigenvalues_diag))
 
     whitening_matrix = eigenvectors @ inv_sqrt_d @ eigenvectors.T
-    dewhitening_matrix = eigenvectors @ sqrt_d @ eigenvectors.T
     whiten_signals = whitening_matrix @ signal
 
-    return whiten_signals, whitening_matrix, dewhitening_matrix
+    return whiten_signals, whitening_matrix
 
 
 def fixed_point_alg(
-    w: np.ndarray,
-    x: np.ndarray,
-    basis: np.ndarray,
+    w: FloatArray,
+    x: FloatArray,
+    basis: FloatArray,
     maxiter: int,
-    contrast_func: str,
-) -> np.ndarray:
+    contrast_func: ContrastFunc,
+) -> FloatArray:
     """Run one-unit FastICA fixed-point iterations with orthogonalization."""
     k = 0
     delta = 1.0
     basis_bt = basis @ basis.T
     n_samples = x.shape[1]
 
-    while delta > _FIXED_POINT_TOL and k < maxiter - 1:
+    while delta > _FIXED_POINT_TOL and k < maxiter:
         w_last = w.copy()
         wtx = w_last.T @ x
 
@@ -118,31 +123,36 @@ def fixed_point_alg(
         w = w - basis_bt @ w
         w_norm = np.linalg.norm(w)
         if w_norm == 0:
+            logger.warning(
+                "FastICA: separating vector collapsed to zero norm after "
+                "%d iterations; stopping early.",
+                k,
+            )
             break
         w = w / w_norm
 
         k += 1
-        delta = abs(abs(np.dot(w.flatten(), w_last.flatten())) - 1)
+        delta = float(abs(abs(np.dot(w.flatten(), w_last.flatten())) - 1))
 
     return w
 
 
-def _pulse_train(w: np.ndarray, x: np.ndarray) -> np.ndarray:
+def _pulse_train(w: FloatArray, x: FloatArray) -> FloatArray:
     """Project source and apply signed-squared nonlinearity."""
     wtx = w.T @ x
     return signed_square(wtx).flatten()
 
 
-def _detect_peaks(icasig: np.ndarray, fsamp: float) -> np.ndarray:
+def _detect_peaks(icasig: FloatArray, fsamp: float) -> IntArray:
     """Detect candidate spikes with refractory-distance peak picking."""
     return find_refractory_peaks(icasig, fsamp, min_isi_sec=_MIN_ISI_SEC)
 
 
 def get_spikes(
-    w: np.ndarray,
-    x: np.ndarray,
+    w: FloatArray,
+    x: FloatArray,
     fsamp: float,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[FloatArray, IntArray]:
     """Estimate spike times from one source using k-means amplitude split."""
     icasig = _pulse_train(w, x)
     spikes = _detect_peaks(icasig, fsamp)
@@ -160,21 +170,22 @@ def get_spikes(
 
 
 def minimize_isi_covariance(
-    w: np.ndarray,
-    x: np.ndarray,
+    w: FloatArray,
+    x: FloatArray,
     cov: float,
     fsamp: float,
-) -> tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[FloatArray, IntArray, float]:
     """Refine separating vector by minimizing ISI coefficient of variation."""
     cov_last = cov + 0.1
-    spikes = np.array([1])
-    spikes_last = spikes
-    w_last = w.copy()
+    spikes = np.array([], dtype=int)
+
+    best_w = w.copy()
+    best_spikes = spikes
+    best_cov = np.inf
 
     while cov < cov_last:
         cov_last = cov
-        spikes_last = spikes
-        w_last = w.copy()
+        w_detect = w.copy()
 
         _, spikes = get_spikes(w, x, fsamp)
 
@@ -183,19 +194,25 @@ def minimize_isi_covariance(
 
         cov = isi_cov(spikes, fsamp)
 
+        if cov < best_cov:
+            best_cov = cov
+            best_spikes = spikes
+            best_w = w_detect
+
         w = np.sum(x[:, spikes], axis=1)
 
-    if len(spikes_last) < 2:
-        _, spikes_last = get_spikes(w_last, x, fsamp)
+    if len(best_spikes) < 2:
+        _, spikes = get_spikes(best_w, x, fsamp)
+        return best_w, spikes, isi_cov(spikes, fsamp)
 
-    return w_last, spikes_last, cov_last
+    return best_w, best_spikes, best_cov
 
 
 def compute_silhouette(
-    x: np.ndarray,
-    w: np.ndarray,
+    x: FloatArray,
+    w: FloatArray,
     fsamp: float,
-) -> tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[FloatArray, IntArray, float]:
     """Compute silhouette-like separability score for detected spikes."""
     icasig = _pulse_train(w, x)
     spikes = _detect_peaks(icasig, fsamp)
@@ -219,28 +236,24 @@ def compute_silhouette(
 
 
 def subtract_mu_waveforms(
-    x: np.ndarray,
-    spikes: np.ndarray,
+    x: FloatArray,
+    spikes: IntArray,
     fsamp: float,
     win: float,
-) -> np.ndarray:
+) -> FloatArray:
     """Subtract averaged MU waveform estimate from multichannel signal."""
     window_l = int(np.round(win * fsamp))
-    n_rows, n_cols = x.shape
+    n_cols = x.shape[1]
 
     spikes = np.asarray(spikes, dtype=int)
     valid_spikes = spikes[(spikes >= window_l) & (spikes < n_cols - window_l)]
     if valid_spikes.size == 0:
         return x
 
-    # Extract all segments at once: (n_rows, n_spikes, window_size)
     offsets = np.arange(-window_l, window_l + 1, dtype=int)
     idx = valid_spikes[:, None] + offsets[None, :]  # (n_spikes, window_size)
     waveforms = x[:, idx].mean(axis=1)  # (n_rows, window_size)
 
-    # Scatter-add: stamp mean waveform at each spike position.
-    # Loop is over n_spikes (~80), not n_rows (~1024) — each iteration is a
-    # vectorised add across all rows, exploiting sparse firing patterns.
     emg_temp = np.zeros_like(x)
     for s in valid_spikes:
         emg_temp[:, s - window_l : s + window_l + 1] += waveforms
@@ -249,29 +262,18 @@ def subtract_mu_waveforms(
 
 
 def batch_process_filters(
-    mu_filters_by_window: dict[int, np.ndarray],
-    whitened_windows: dict[int, np.ndarray],
+    mu_filters_by_window: dict[int, FloatArray],
+    whitened_windows: dict[int, FloatArray] | Callable[[int], FloatArray],
     coordinates: list[int],
     ltime: int,
     fsamp: float,
-    nwindows_per_grid: int,
-    whiten_mat_by_window: dict[int, np.ndarray] | None = None,
-    full_extended_by_window: dict[int, np.ndarray] | None = None,
-    win_means_by_window: dict[int, np.ndarray] | None = None,
-) -> tuple[np.ndarray, list[np.ndarray]]:
-    """Apply MU filters across windows and reconstruct pulse trains/spike times.
-
-    When ``full_extended_by_window`` and ``whiten_mat_by_window`` are provided,
-    each filter is dewhitened (``w @ W``) and projected onto the full extended
-    signal of its window, producing pulse trains over the entire trace instead
-    of only the decomposed windows.
-
-    ``full_extended_by_window`` holds the *raw* (non-demeaned) extended signal,
-    shared per grid. When ``win_means_by_window`` is also provided, the
-    per-window DC baseline is removed as a cheap additive correction so the
-    dewhitened filter is applied to the same baseline it was estimated on,
-    without building a per-window extended array.
-    """
+    whiten_mat_by_window: dict[int, FloatArray] | None = None,
+    build_full_extended: Callable[[int], FloatArray] | None = None,
+    window_to_grid: dict[int, int] | None = None,
+    win_means_by_window: dict[int, FloatArray] | None = None,
+    artifact_mask: BoolArray | None = None,
+) -> tuple[FloatArray, list[IntArray]]:
+    """Apply MU filters across windows and reconstruct pulse trains/spike times."""
     total_mus = 0
     for nwin in mu_filters_by_window:
         if mu_filters_by_window[nwin].size > 0:
@@ -286,21 +288,28 @@ def batch_process_filters(
     mu_nb = 0
     sorted_wins = sorted(mu_filters_by_window.keys())
 
+    use_full = build_full_extended is not None and whiten_mat_by_window is not None
+    cur_grid: int | None = None
+    raw_ext: FloatArray | None = None
+
     for nwin in sorted_wins:
         filters = mu_filters_by_window[nwin]
         n_filters = filters.shape[1]
-        grid_idx = nwin // max(1, nwindows_per_grid)
+
+        if use_full:
+            assert build_full_extended is not None and whiten_mat_by_window is not None
+            g = window_to_grid[nwin] if window_to_grid is not None else 0
+            if g != cur_grid:
+                raw_ext = build_full_extended(g)
+                cur_grid = g
 
         for j in range(n_filters):
             current_filter = filters[:, j]
 
-            if full_extended_by_window is not None and whiten_mat_by_window is not None:
+            if use_full:
+                assert raw_ext is not None and whiten_mat_by_window is not None
                 w_dewhite = current_filter @ whiten_mat_by_window[nwin]
-                raw_ext = full_extended_by_window[nwin]
                 pt_full = w_dewhite @ raw_ext
-                # Remove the window's per-channel DC baseline as an additive
-                # correction: w_dewhite @ extend(A - m) == w_dewhite @ extend(A)
-                # - corr, avoiding a per-window extended array.
                 if win_means_by_window is not None:
                     win_mean = win_means_by_window[nwin]
                     n_ch = win_mean.size
@@ -316,27 +325,31 @@ def batch_process_filters(
                     pt_full = pt_full - corr
                 pulse_t[mu_nb, :ltime] = pt_full[:ltime]
             else:
-                for nwin2 in whitened_windows:
-                    if nwin2 // max(1, nwindows_per_grid) != grid_idx:
-                        continue
-                    start = coordinates[nwin2 * 2]
-                    segment_len = whitened_windows[nwin2].shape[1]
-                    pt_segment = np.dot(current_filter, whitened_windows[nwin2])
-                    if start + segment_len <= ltime:
-                        pulse_t[mu_nb, start : start + segment_len] = pt_segment
-                    else:
-                        valid_len = ltime - start
-                        pulse_t[mu_nb, start:ltime] = pt_segment[:valid_len]
+                start = coordinates[nwin * 2]
+                w_win = (
+                    whitened_windows(nwin) if callable(whitened_windows) else whitened_windows[nwin]
+                )
+                segment_len = w_win.shape[1]
+                pt_segment = np.dot(current_filter, w_win)
+                pulse_t[mu_nb, start : start + segment_len] = pt_segment[: ltime - start]
 
             pulse_t[mu_nb, :] = signed_square(pulse_t[mu_nb, :])
-            spikes = find_refractory_peaks(pulse_t[mu_nb, :], fsamp, min_isi_sec=_MIN_ISI_SEC)
+            if artifact_mask is not None:
+                pulse_t[mu_nb, artifact_mask] = 0.0
+            spikes = find_refractory_peaks(
+                pulse_t[mu_nb, :], fsamp, min_isi_sec=POSTPROC_MIN_ISI_SEC
+            )
 
             if len(spikes) > 1:
                 high_spikes, _, _ = split_by_amplitude(
                     pulse_t[mu_nb, :], spikes, kmeans_iter=_KMEANS_ITER
                 )
+                if artifact_mask is not None and len(high_spikes) > 0:
+                    high_spikes = high_spikes[~artifact_mask[high_spikes]]
                 distime.append(high_spikes)
             else:
+                if artifact_mask is not None and len(spikes) > 0:
+                    spikes = spikes[~artifact_mask[spikes]]
                 distime.append(spikes)
 
             mu_nb += 1
@@ -345,85 +358,84 @@ def batch_process_filters(
 
 
 def rem_duplicates(
-    pulse_t: np.ndarray,
-    distime: list[np.ndarray],
-    distime_ref: list[np.ndarray] | None,
+    pulse_t: FloatArray,
+    distime: list[IntArray],
+    distime_ref: list[IntArray] | None,
     maxlag: int,
     jitter: float,
     tol: float,
     fsamp: float,
-) -> tuple[np.ndarray, list[np.ndarray], list[int]]:
+) -> tuple[FloatArray, list[IntArray], list[int]]:
     """Remove duplicated motor units based on lag-aware spike-train overlap."""
 
     if distime_ref is None:
         distime_ref = distime
 
-    jit = int(round(jitter * fsamp))
+    jitter_samples = int(round(jitter * fsamp))
 
     n_mus = pulse_t.shape[0]
     l_sig = pulse_t.shape[1]
 
-    distimmp = []
-    distimmp_sets = []
-    kept_indices = []
+    jittered_distimes: list[IntArray] = []
+    kept_indices: list[int] = []
 
     for i in range(n_mus):
         d_times = np.asarray(distime_ref[i], dtype=int)
         if len(d_times) > 0:
             d_times = d_times[d_times < l_sig]
             expanded_set = set(d_times.tolist())
-            for j in range(1, jit + 1):
+            for j in range(1, jitter_samples + 1):
                 expanded_set.update((d_times - j).tolist())
                 expanded_set.update((d_times + j).tolist())
 
             expanded = np.array(list(expanded_set), dtype=int)
             expanded = expanded[(expanded >= 0) & (expanded < l_sig)]
-            distimmp.append(expanded)
-            distimmp_sets.append(set(expanded.tolist()))
+            jittered_distimes.append(expanded)
         else:
-            distimmp.append(np.array([]))
-            distimmp_sets.append(set())
+            jittered_distimes.append(np.array([]))
 
-    pulsenew = []
-    distimenew = []
+    kept_pulses: list[FloatArray] = []
+    kept_distimes: list[IntArray] = []
     active_mus = np.ones(n_mus, dtype=bool)
+
+    lag_gate = 0.2
+    lags_vec = np.arange(-2 * maxlag, 2 * maxlag + 1)
 
     for i in range(n_mus):
         if not active_mus[i]:
             continue
-        ref_expanded = distimmp[i]
+        ref_expanded = jittered_distimes[i]
         if len(ref_expanded) == 0:
+            logger.debug("rem_duplicates: skipping MU %d (empty spike train)", i)
             continue
         duplicates = [i]
+        ref_raster = np.zeros(l_sig, dtype=bool)
+        ref_raster[ref_expanded] = True
 
         for j in range(i + 1, n_mus):
             if not active_mus[j]:
                 continue
-            target_expanded = distimmp[j]
+            target_expanded = jittered_distimes[j]
             if len(target_expanded) == 0:
                 continue
-            ref_set = distimmp_sets[i]
-            tgt_set = distimmp_sets[j]
-            best_corr = 0.0
-            best_lag = 0
-            norm = np.sqrt(max(len(distime[i]), 1) * max(len(distime[j]), 1))
-            lag_range = range(-2 * maxlag, 2 * maxlag + 1)
-            for lag in lag_range:
-                shifted = {t + lag for t in tgt_set if 0 <= t + lag < l_sig}
-                overlap = len(ref_set & shifted)
-                corr_val = overlap / norm if norm > 0 else 0
-                if corr_val > best_corr:
-                    best_corr = corr_val
-                    best_lag = lag
-            aligned_target = target_expanded + best_lag if best_corr > 0.2 else target_expanded
+            norm = np.sqrt(max(len(ref_expanded), 1) * max(len(target_expanded), 1))
+            shifted = target_expanded[:, None] + lags_vec[None, :]
+            valid = (shifted >= 0) & (shifted < l_sig)
+            overlap = (ref_raster[np.clip(shifted, 0, l_sig - 1)] & valid).sum(axis=0)
+            max_overlap = int(overlap.max()) if overlap.size else 0
+            if max_overlap > 0:
+                best_idx = int(np.argmax(overlap))
+                best_lag = int(lags_vec[best_idx])
+                best_corr = max_overlap / norm if norm > 0 else 0.0
+            else:
+                best_lag = 0
+                best_corr = 0.0
+            aligned_target = target_expanded + best_lag if best_corr > lag_gate else target_expanded
             common = np.intersect1d(ref_expanded, aligned_target)
             if len(common) > 0:
                 common = np.sort(common)
-                filtered_common = [common[0]]
-                for k in range(1, len(common)):
-                    if common[k] != common[k - 1] + 1:
-                        filtered_common.append(common[k])
-                n_common = len(filtered_common)
+                # Count runs of consecutive samples as one shared discharge.
+                n_common = 1 + int(np.count_nonzero(np.diff(common) != 1))
             else:
                 n_common = 0
             len_ref = len(distime[i])
@@ -442,11 +454,11 @@ def rem_duplicates(
         best_idx_local = int(np.argmin(covs))
         best_idx = duplicates[best_idx_local]
 
-        distimenew.append(distime[best_idx])
-        pulsenew.append(pulse_t[best_idx, :])
+        kept_distimes.append(distime[best_idx])
+        kept_pulses.append(pulse_t[best_idx, :])
         kept_indices.append(best_idx)
 
         for idx_dup in duplicates:
             active_mus[idx_dup] = False
 
-    return np.array(pulsenew), distimenew, kept_indices
+    return np.array(kept_pulses), kept_distimes, kept_indices

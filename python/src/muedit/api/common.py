@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
-import struct
-import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import numpy as np
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException
 
-from muedit.api.cache import UPLOAD_CHUNK_SIZE
-from muedit.decomp.types import DecompositionParameters
+from muedit.decomp.types import ContrastFunc, DecompositionParameters
 
 
 def parse_json(raw: str | None, field_name: str) -> Any:
@@ -66,15 +62,15 @@ def parse_discard_channels(raw: str | None) -> list[list[int]] | None:
     return result
 
 
-def parse_rois(raw: str | None) -> list[tuple[int, int]] | None:
-    """Parse ROI payload into list of (start, end) sample tuples."""
-    parsed = parse_json(raw, "rois")
+def parse_rois(raw: str | None, field: str = "rois") -> list[tuple[int, int]] | None:
+    """Parse a sample-range payload into a list of (start, end) tuples."""
+    parsed = parse_json(raw, field)
     if parsed is None:
         return None
     if not isinstance(parsed, list):
         raise HTTPException(
             status_code=400,
-            detail={"field": "rois", "reason": "Expected list of [start, end] pairs"},
+            detail={"field": field, "reason": "Expected list of [start, end] pairs"},
         )
 
     result: list[tuple[int, int]] = []
@@ -87,8 +83,8 @@ def parse_rois(raw: str | None) -> list[tuple[int, int]] | None:
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "field": "rois",
-                    "reason": f"ROI {idx} must be [start, end] or object with start/end",
+                    "field": field,
+                    "reason": f"Range {idx} must be [start, end] or object with start/end",
                 },
             )
         try:
@@ -96,7 +92,7 @@ def parse_rois(raw: str | None) -> list[tuple[int, int]] | None:
         except (TypeError, ValueError) as exc:
             raise HTTPException(
                 status_code=400,
-                detail={"field": "rois", "reason": f"ROI {idx} has non-integer bounds"},
+                detail={"field": field, "reason": f"Range {idx} has non-integer bounds"},
             ) from exc
     return result
 
@@ -114,12 +110,20 @@ def parse_json_object(raw: str | None, field_name: str) -> dict | None:
     return parsed
 
 
-def safe_unlink(path: str) -> None:
-    """Best-effort file removal without propagating OS errors."""
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
+def _coerce_param_value(current: Any, value: Any) -> Any:
+    """Coerce a JSON override value to match the type of the existing param.
+
+    ``bool`` is handled explicitly because ``bool("false")`` is ``True`` in Python;
+    string values are interpreted case-insensitively.
+    """
+    if isinstance(current, bool):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "1", "yes")
+        return bool(value)
+    target_type = type(current)
+    return target_type(value)
 
 
 def build_params(raw: str | None) -> DecompositionParameters:
@@ -140,9 +144,44 @@ def build_params(raw: str | None) -> DecompositionParameters:
         if hasattr(base, key) and value is not None:
             current = getattr(base, key)
             try:
-                setattr(base, key, type(current)(value))
-            except (TypeError, ValueError):
-                setattr(base, key, value)
+                setattr(base, key, _coerce_param_value(current, value))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "field": key,
+                        "reason": f"Cannot coerce {value!r} to {type(current).__name__}",
+                    },
+                ) from exc
+
+    contrast_funcs = get_args(ContrastFunc)
+    if base.contrast_func not in contrast_funcs:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "field": "contrast_func",
+                "reason": f"contrast_func must be one of {', '.join(contrast_funcs)}",
+            },
+        )
+    if base.adapt_batch_ms <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "field": "adapt_batch_ms",
+                "reason": "adapt_batch_ms must be > 0",
+            },
+        )
+    if base.use_adaptive and base.adapt_batch_ms > base.edges_sec * 1000:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "field": "adapt_batch_ms",
+                "reason": (
+                    f"adapt_batch_ms must be <= {base.edges_sec * 1000:.0f} "
+                    f"(edges_sec * 1000) when use_adaptive is enabled"
+                ),
+            },
+        )
     return base
 
 
@@ -160,29 +199,15 @@ def make_json_safe(value: Any) -> Any:
     return value
 
 
-def _pack_json_f32_payload(magic: bytes, meta: dict[str, Any], *arrays: np.ndarray) -> bytes:
-    """Pack versioned binary payload: magic(4) + v1 + JSON-meta + float32 arrays."""
-    meta_bytes = json.dumps(make_json_safe(meta), separators=(",", ":")).encode("utf-8")
-    parts: list[bytes] = [magic, struct.pack("<I", 1), struct.pack("<I", len(meta_bytes))]
-    for arr in arrays:
-        parts += [struct.pack("<I", arr.shape[0]), struct.pack("<I", arr.shape[1])]
-    parts.append(meta_bytes)
-    for arr in arrays:
-        parts.append(arr.astype("<f4", copy=False).tobytes(order="C"))
-    return b"".join(parts)
-
-
-async def save_upload_to_temp(file: UploadFile) -> str:
-    """Persist uploaded file to a temporary path and return that path."""
-    extension = os.path.splitext(file.filename or "")[1]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp:
-        while True:
-            chunk = await file.read(UPLOAD_CHUNK_SIZE)
-            if not chunk:
-                break
-            tmp.write(chunk)
-    return tmp.name
-
+def require_existing_path(path: str, field: str = "path") -> Path:
+    """Return ``path`` as a Path, raising HTTP 404 when nothing exists there."""
+    resolved = Path(path)
+    if not resolved.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={"field": field, "reason": f"File not found: {path}"},
+        )
+    return resolved
 
 
 def parse_entity_label(file_label: str) -> str:
@@ -198,40 +223,11 @@ def parse_entity_label(file_label: str) -> str:
     return stem
 
 
-def serialize_preview(result: dict[str, Any]) -> dict[str, Any]:
-    """Extract and normalize preview payload from decomposition result object."""
-    preview = result.get("preview", {})
-    distime = preview.get("distime", [])
-    return {
-        "mean_abs": preview.get("mean_abs", []),
-        "pulse_trains": preview.get("pulse_trains", []),
-        "pulse_trains_full": preview.get("pulse_trains_full", []),
-        "distime": [list(map(int, d)) for d in distime],
-        "distime_all": [list(map(int, d)) for d in preview.get("distime_all", distime)],
-        "pulse_trains_all": preview.get("pulse_trains_all", []),
-        "mu_grid_index": preview.get("mu_grid_index", []),
-        "fsamp": preview.get("fsamp"),
-        "grid_mean_abs": preview.get("grid_mean_abs", []),
-        "grid_names": preview.get("grid_names", []),
-        "total_samples": preview.get("total_samples"),
-        "channel_means": preview.get("channel_means", []),
-        "coordinates": preview.get("coordinates", []),
-        "metadata": preview.get("metadata", {}),
-        "muscle": preview.get("muscle", []),
-        "auxiliary": preview.get("auxiliary"),
-        "auxiliary_names": preview.get("auxiliaryname", []),
-    }
-
-
-def summarize_result(
-    result: dict[str, Any], save_path: str, persisted: bool
-) -> dict[str, Any]:
+def summarize_result(result: dict[str, Any], save_path: str, persisted: bool) -> dict[str, Any]:
     """Build compact decomposition summary for frontend progress/result panels."""
     signal = result.get("signal", {})
     pulse_t = signal.get("PulseT")
-    pulse_len = (
-        int(pulse_t.shape[1]) if hasattr(pulse_t, "shape") and pulse_t.size > 0 else 0
-    )
+    pulse_len = int(pulse_t.shape[1]) if hasattr(pulse_t, "shape") and pulse_t.size > 0 else 0
     mu_count = len(signal.get("Dischargetimes", []))
 
     return {
@@ -239,7 +235,7 @@ def summarize_result(
         "grid_names": result.get("grid_names", []),
         "mu_count": mu_count,
         "pulse_length": pulse_len,
-        "sil": result.get("sil", {}),
+        "sil": result.get("sil", []),
         "discard_channels": result.get("discard_channels"),
         "save_path": save_path if persisted else None,
         "parameters": result.get("parameters"),

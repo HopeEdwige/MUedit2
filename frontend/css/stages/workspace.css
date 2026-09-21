@@ -11,9 +11,9 @@
 
 .workspace-header {
   position: relative;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: center;
   gap: 12px;
   padding: 8px 14px 10px;
   border-bottom: 1px solid var(--border);
@@ -24,13 +24,27 @@
 .status-pill {
   padding: 4px 6px;
   border-radius: 999px;
-  border: 1px solid transparent;
+  border: none;
   background: transparent;
   color: var(--muted);
   font-size: var(--fs-sm);
   letter-spacing: 0.02em;
   text-transform: none;
   font-weight: var(--fw-light);
+}
+
+.app-status {
+  grid-column: 3;
+  justify-self: end;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-status:empty {
+  display: none;
 }
 
 .settings-toggle-btn {
@@ -78,22 +92,20 @@
 
 .status-pill[data-tone="error"] {
   color: var(--danger);
-  border-color: var(--danger);
 }
 
 .status-pill[data-tone="success"] {
   color: var(--success);
-  border-color: var(--success);
 }
 
 /* ── Workflow Stepper ── */
 
 .workflow-stepper {
+  grid-column: 2;
   display: flex;
   justify-content: center;
   gap: 6px;
   flex-wrap: wrap;
-  flex: 0 1 auto;
 }
 
 .step-chip {
@@ -405,6 +417,14 @@
   color: var(--muted);
   font-size: var(--fs-md);
   font-weight: var(--fw-light);
+}
+
+.form-hint {
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-light);
+  line-height: 1.4;
 }
 
 .form-row input,

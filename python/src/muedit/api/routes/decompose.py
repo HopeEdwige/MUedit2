@@ -2,62 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import Response, StreamingResponse
 
-from muedit.api.common import parse_discard_channels, safe_unlink
 from muedit.api.config import resolve_bids_root
-from muedit.api.contracts import success_payload
 from muedit.api.services.decompose_service import (
     decomposition_event_stream,
     fetch_decompose_preview_binary,
     parse_stream_options,
     resolve_decompose_input,
-    run_decomposition_once,
 )
 
 router = APIRouter(prefix="/api/v1")
 
 
-@router.post("/decompose")
-async def decompose(
-    file: UploadFile | None = File(None),
-    params: str = Form(None),
-    duration: float | None = Form(None),
-    persist_output: bool = Form(False),
-    discard_channels: str | None = Form(None),
-    full_preview: bool = Form(False),
-    upload_token: str | None = Form(None),
-) -> dict[str, Any]:
-    """Run decomposition once and return a non-streamed summary + preview payload."""
-    tmp_path, run_path, preloaded_signal, file_label = await resolve_decompose_input(
-        file, upload_token
-    )
-    try:
-        discard_override = parse_discard_channels(discard_channels)
-        return success_payload(
-            run_decomposition_once(
-                input_path=run_path,
-                duration=duration,
-                params_raw=params,
-                persist_output=persist_output,
-                discard_override=discard_override,
-                file_label=file_label,
-                include_full_preview=full_preview,
-                preloaded_signal=preloaded_signal,
-            )
-        )
-    finally:
-        if tmp_path:
-            safe_unlink(tmp_path)
-
-
 @router.post("/decompose_stream")
 async def decompose_stream(
     request: Request,
-    file: UploadFile | None = File(None),
     params: str = Form(None),
     duration: float | None = Form(None),
     persist_output: bool = Form(False),
@@ -71,23 +32,29 @@ async def decompose_stream(
     bids_metadata: str | None = Form(None),
     full_preview: bool = Form(False),
     upload_token: str | None = Form(None),
+    artifact_regions: str | None = Form(None),
 ) -> StreamingResponse:
     """Run decomposition and stream stage/progress events as NDJSON."""
-    tmp_path, run_path, preloaded_signal, file_label = await resolve_decompose_input(
-        file, upload_token
-    )
-    roi, roi_list, discard_override, bids_entities_obj, bids_metadata_obj = parse_stream_options(
+    run_path, preloaded_signal = resolve_decompose_input(upload_token)
+    (
+        roi,
+        roi_list,
+        discard_override,
+        bids_entities_obj,
+        bids_metadata_obj,
+        artifact_region_list,
+    ) = parse_stream_options(
         roi_start=roi_start,
         roi_end=roi_end,
         rois=rois,
         discard_channels=discard_channels,
         bids_entities=bids_entities,
         bids_metadata=bids_metadata,
+        artifact_regions=artifact_regions,
     )
 
     wants_binary_preview = request.headers.get("x-muedit-binary", "1") != "0"
     generator = decomposition_event_stream(
-        tmp_path=tmp_path,
         run_path=run_path,
         params_raw=params,
         duration=duration,
@@ -98,11 +65,10 @@ async def decompose_stream(
         bids_root=str(resolve_bids_root(project)) if bids_export else None,
         bids_entities=bids_entities_obj,
         bids_metadata=bids_metadata_obj,
-        file_label=file_label,
         include_full_preview=full_preview,
         preloaded_signal=preloaded_signal,
-        cleanup=safe_unlink,
         binary_preview=wants_binary_preview,
+        artifact_regions=artifact_region_list,
     )
     return StreamingResponse(generator, media_type="application/x-ndjson")
 

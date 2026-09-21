@@ -1,8 +1,17 @@
 import { COLORS } from "../config.js";
-import { drawRoiRects } from "./plots.js";
-import { gridDimensionsFor } from "../io/grid.js";
-import { roiStart, roiEnd } from "../state/selectors.js";
 import {
+  drawGridOverlay,
+  drawMiniSeries,
+  drawRoiRects,
+  nextFrame,
+} from "./plots.js";
+import { gridDimensionsFor } from "../io/grid.js";
+import { getCurrentGrid, roiStart, roiEnd } from "../state/selectors.js";
+import {
+  addArtifactRegion,
+  ensureDiscardMasks,
+  setArtifactDraft,
+  setArtifactMode,
   setChannelTraces,
   setCurrentGrid,
   setDiscardMaskChannel,
@@ -10,20 +19,65 @@ import {
   setRoiForIndex,
 } from "../state/actions.js";
 
-export function refreshVisuals(deps) {
-  const {
-    state,
-    els,
-    drawGridOverlay,
-    renderAuxiliaryChannels,
-    renderMuExplorer,
-  } = deps;
-  const selections = state.roiDraft
+/** @typedef {import("../app/context.js").App} App */
+/** @typedef {import("../app/context.js").Els} Els */
+/** @typedef {import("../app/context.js").RoiCanvasId} RoiCanvasId */
+/** @typedef {import("../app/state.js").State} State */
+/** @typedef {import("./plots.js").Overlay} Overlay */
+
+/**
+ * Decomposition ROIs and artifact windows are drawn on the same canvases, so
+ * they travel as one selection list; `kind: "artifact"` is what tells
+ * `drawRoiRects` to switch colour. Drafts are appended so an in-flight drag
+ * renders alongside the committed windows.
+ *
+ * @param {State} state
+ * @returns {Overlay[]}
+ */
+export function buildSelections(state) {
+  const rois = state.roiDraft
     ? [...(state.rois || []), state.roiDraft]
-    : state.rois;
-  const emgCanvas = els?.emgCanvas || "emgCanvas";
+    : state.rois || [];
+  const artifacts = state.artifactDraft
+    ? [...(state.artifactRegions || []), state.artifactDraft]
+    : state.artifactRegions || [];
+  return [
+    ...rois,
+    ...artifacts.map((a) => ({ start: a.start, end: a.end, kind: "artifact" })),
+  ];
+}
+
+/**
+ * Sync the +/- control row with state. Driven from `refreshVisuals` so every
+ * path that changes artifact windows updates the count and armed state
+ * without having to remember to call this itself.
+ *
+ * @param {Els} els
+ * @param {State} state
+ */
+export function renderArtifactControls(els, state) {
+  if (els?.artifactCount) {
+    els.artifactCount.textContent = String(
+      (state.artifactRegions || []).length,
+    );
+  }
+  if (els?.artifactAddBtn) {
+    const armed = !!state.artifactMode;
+    els.artifactAddBtn.classList.toggle("armed", armed);
+    els.artifactAddBtn.setAttribute("aria-pressed", armed ? "true" : "false");
+  }
+  if (els?.artifactRemoveBtn) {
+    els.artifactRemoveBtn.disabled = !(state.artifactRegions || []).length;
+  }
+}
+
+/** @param {App} app */
+export function refreshVisuals(app) {
+  const { state, els, renderAuxiliaryChannels, renderMuExplorer } = app;
+  const selections = buildSelections(state);
+  renderArtifactControls(els, state);
   drawGridOverlay(
-    emgCanvas,
+    els.emgCanvas,
     state.gridSeries,
     state.gridColors,
     selections,
@@ -33,29 +87,35 @@ export function refreshVisuals(deps) {
   renderMuExplorer();
 }
 
-export function enableRoiSelection(deps, canvasId) {
+/**
+ * @param {App} app
+ * @param {RoiCanvasId} canvasId
+ */
+export function enableRoiSelection(app, canvasId) {
   const {
     state,
     els,
     syncRois,
-    refreshVisualsFn,
+    refreshVisuals,
     requestQcGridWindow,
     updateProgress,
-  } = deps;
-  const canvas = els?.[canvasId] || document.getElementById(canvasId);
+  } = app;
+  const canvas = els[canvasId];
   if (!canvas || canvas.dataset.roiBound === "1") return;
   canvas.dataset.roiBound = "1";
 
   let dragging = false;
   let startX = 0;
   let endX = 0;
+  let dragIsArtifact = false;
 
-  const toSamples = (sx, ex) => {
+  const toSamples = (/** @type {number} */ sx, /** @type {number} */ ex) => {
     const width = canvas.clientWidth || 1;
+    const total = state.seriesLength || 0;
     const s = Math.max(0, Math.min(width, Math.min(sx, ex)));
     const e = Math.max(0, Math.min(width, Math.max(sx, ex)));
-    const startSample = Math.round((s / width) * state.seriesLength);
-    const endSample = Math.round((e / width) * state.seriesLength);
+    const startSample = Math.round((s / width) * total);
+    const endSample = Math.round((e / width) * total);
     return { startSample, endSample };
   };
 
@@ -79,7 +139,7 @@ export function enableRoiSelection(deps, canvasId) {
     });
     setRoiDraft(state, null);
     setChannelTraces(state, []);
-    refreshVisualsFn();
+    refreshVisuals();
     requestQcGridWindow(
       state.currentGrid,
       state.rois[0]?.start || 0,
@@ -91,13 +151,32 @@ export function enableRoiSelection(deps, canvasId) {
     );
   };
 
+  const commitArtifact = () => {
+    if (!state.seriesLength) return;
+    const { startSample, endSample } = toSamples(startX, endX);
+    addArtifactRegion(state, {
+      start: startSample,
+      end: Math.max(startSample + 1, endSample),
+    });
+    setArtifactDraft(state, null);
+    setArtifactMode(state, false);
+    refreshVisuals();
+    const n = state.artifactRegions.length;
+    updateProgress(
+      undefined,
+      `Artifact window added (${n} window${n > 1 ? "s" : ""})`,
+    );
+  };
+
   canvas.addEventListener("mousedown", (e) => {
     if (!state.seriesLength) return;
     dragging = true;
+    dragIsArtifact = !!state.artifactMode;
     const rect = canvas.getBoundingClientRect();
     startX = e.clientX - rect.left;
     endX = startX;
     setRoiDraft(state, null);
+    setArtifactDraft(state, null);
   });
 
   canvas.addEventListener("mousemove", (e) => {
@@ -105,11 +184,13 @@ export function enableRoiSelection(deps, canvasId) {
     const rect = canvas.getBoundingClientRect();
     endX = e.clientX - rect.left;
     const { startSample, endSample } = toSamples(startX, endX);
-    setRoiDraft(state, {
+    const draft = {
       start: startSample,
       end: Math.max(startSample + 1, endSample),
-    });
-    refreshVisualsFn();
+    };
+    if (dragIsArtifact) setArtifactDraft(state, draft);
+    else setRoiDraft(state, draft);
+    refreshVisuals();
   });
 
   window.addEventListener("mouseup", () => {
@@ -120,28 +201,27 @@ export function enableRoiSelection(deps, canvasId) {
     dragging = false;
     if (Math.abs(endX - startX) < 4) {
       setRoiDraft(state, null);
-      refreshVisualsFn();
+      setArtifactDraft(state, null);
+      refreshVisuals();
       return;
     }
-    commitSelection();
+    if (dragIsArtifact) commitArtifact();
+    else commitSelection();
   });
 }
 
-export function renderChannelQC(deps, waitForMiniPlots = false) {
-  const {
-    state,
-    els,
-    nextFrame,
-    drawMiniSeries,
-    requestQcGridWindow,
-    getCurrentGrid,
-    ensureDiscardMasks,
-  } = deps;
+/**
+ * @param {App} app
+ * @param {boolean} [waitForMiniPlots]
+ * @returns {Promise<void> | undefined}
+ */
+export function renderChannelQC(app, waitForMiniPlots = false) {
+  const { state, els, requestQcGridWindow } = app;
   const section = els.qcSection;
   if (!section) return waitForMiniPlots ? Promise.resolve() : undefined;
   section.innerHTML = "";
-  ensureDiscardMasks();
-  let gridIdx = getCurrentGrid();
+  ensureDiscardMasks(state);
+  let gridIdx = getCurrentGrid(state);
   const allMeans = state.channelMeans || [];
   if (!allMeans[gridIdx] && allMeans.length) {
     gridIdx = 0;
@@ -162,6 +242,7 @@ export function renderChannelQC(deps, waitForMiniPlots = false) {
 
   const mask = state.discardMasks?.[gridIdx] || [];
   const traces = state.channelTraces?.[gridIdx] || [];
+  /** @type {(() => void)[]} */
   const miniDrawJobs = [];
   if (!traces.length) {
     const roi = state.rois?.[0];
@@ -182,7 +263,7 @@ export function renderChannelQC(deps, waitForMiniPlots = false) {
     const off = mask[chIdx] === 1;
     if (off) cell.classList.add("off");
     const label = document.createElement("div");
-    label.textContent = chIdx + 1;
+    label.textContent = String(chIdx + 1);
     label.className = "qc-label";
     const mini = document.createElement("canvas");
     mini.height = 26;
@@ -194,7 +275,7 @@ export function renderChannelQC(deps, waitForMiniPlots = false) {
     cell.title = `Channel ${chIdx + 1} • mean |EMG| ${meanText}`;
     cell.addEventListener("click", () => {
       setDiscardMaskChannel(state, gridIdx, chIdx, off ? 0 : 1);
-      renderChannelQC(deps, false);
+      renderChannelQC(app, false);
     });
     miniDrawJobs.push(() =>
       drawMiniSeries(mini, traces[chIdx], mask[chIdx] === 1),
@@ -217,6 +298,10 @@ export function renderChannelQC(deps, waitForMiniPlots = false) {
   return undefined;
 }
 
+/**
+ * @param {Els} els
+ * @param {State} state
+ */
 export function populateAuxSelector(els, state) {
   const sel = els.auxSelector;
   if (!sel) return;
@@ -224,17 +309,22 @@ export function populateAuxSelector(els, state) {
   if (state.auxNames && state.auxNames.length) {
     state.auxNames.forEach((name, idx) => {
       const opt = document.createElement("option");
-      opt.value = idx;
+      opt.value = String(idx);
       opt.textContent = name || `Aux ${idx + 1}`;
       sel.appendChild(opt);
     });
   }
 }
 
+/**
+ * @param {Els} els
+ * @param {State} state
+ */
 export function renderAuxiliaryChannels(els, state) {
   const canvas = els.auxCanvas;
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
+  if (!ctx) return;
   const w = canvas.clientWidth || canvas.width || 1;
   const h = canvas.clientHeight || canvas.height || 120;
   canvas.width = w;
@@ -263,9 +353,7 @@ export function renderAuxiliaryChannels(els, state) {
   if (globalMin === Infinity) return;
   const span = globalMax - globalMin || 1;
 
-  const selections = state.roiDraft
-    ? [...(state.rois || []), state.roiDraft]
-    : state.rois;
+  const selections = buildSelections(state);
   drawRoiRects(
     ctx,
     selections,

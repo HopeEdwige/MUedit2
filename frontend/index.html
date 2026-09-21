@@ -6,15 +6,15 @@
     <title>MUedit</title>
     <link rel="icon" href="data:," />
     <link rel="shortcut icon" href="data:," />
-    <link rel="stylesheet" href="css/tokens.css?v=62" />
-    <link rel="stylesheet" href="css/base.css?v=62" />
-    <link rel="stylesheet" href="css/stages/landing.css?v=62" />
-    <link rel="stylesheet" href="css/stages/workspace.css?v=62" />
-    <link rel="stylesheet" href="css/stages/run.css?v=62" />
-    <link rel="stylesheet" href="css/stages/qc.css?v=62" />
-    <link rel="stylesheet" href="css/stages/edit.css?v=62" />
-    <link rel="stylesheet" href="css/stages/import.css?v=62" />
-    <link rel="stylesheet" href="css/responsive.css?v=62" />
+    <link rel="stylesheet" href="css/tokens.css?v=64" />
+    <link rel="stylesheet" href="css/base.css?v=64" />
+    <link rel="stylesheet" href="css/stages/landing.css?v=64" />
+    <link rel="stylesheet" href="css/stages/workspace.css?v=64" />
+    <link rel="stylesheet" href="css/stages/run.css?v=64" />
+    <link rel="stylesheet" href="css/stages/qc.css?v=64" />
+    <link rel="stylesheet" href="css/stages/edit.css?v=64" />
+    <link rel="stylesheet" href="css/stages/import.css?v=64" />
+    <link rel="stylesheet" href="css/responsive.css?v=64" />
   </head>
 
   <body>
@@ -73,6 +73,12 @@
               <span class="step-chip-label">Edit</span>
             </button>
           </div>
+          <span
+            id="status"
+            class="status-pill app-status"
+            role="status"
+            aria-live="polite"
+          ></span>
         </div>
 
         <section class="landing" id="landing">
@@ -374,28 +380,15 @@
                   <label for="peelOffWindow">Window (ms)</label>
                   <input type="number" id="peelOffWindow" value="25" min="1" />
                 </div>
-                <div class="toggle-row">
-                  <button
-                    class="pill-toggle"
-                    id="useAdaptiveToggle"
-                    data-state="off"
-                    type="button"
-                    aria-pressed="false"
-                  >
-                    Use adaptive: Off
-                  </button>
+                <div class="form-row">
+                  <label for="postprocessMode">Post-processing</label>
+                  <select id="postprocessMode">
+                    <option value="windowed" selected>Windowed</option>
+                    <option value="full-trace">Full trace</option>
+                    <option value="adaptive">Adaptive</option>
+                  </select>
                 </div>
-                <div class="toggle-row">
-                  <button
-                    class="pill-toggle"
-                    id="fullTraceToggle"
-                    data-state="off"
-                    type="button"
-                    aria-pressed="false"
-                  >
-                    Full trace: Off
-                  </button>
-                </div>
+                <p class="form-hint" id="postprocessModeHint"></p>
               </div>
             </section>
 
@@ -464,6 +457,28 @@
                     <!-- Dynamically populated Grid 1, Grid 2, etc. -->
                   </div>
                   <button
+                    class="start-btn qc-auto-btn"
+                    id="qcAutoBtn"
+                    type="button"
+                    title="Detect bad channels and artifact windows automatically, then correct them by hand"
+                  >
+                    <span>Automatic QC</span>
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke-width="1.5"
+                      stroke="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z"
+                      />
+                    </svg>
+                  </button>
+                  <button
                     class="start-btn qc-run-btn"
                     id="startBtn"
                     type="button"
@@ -493,6 +508,29 @@
                   <div class="qc-right-column">
                     <div class="chart-card glass">
                       <div class="chart-title">Average EMG Activity</div>
+                      <div class="artifact-controls">
+                        <span class="artifact-controls-label">
+                          Artifact windows
+                        </span>
+                        <button
+                          class="artifact-btn"
+                          id="artifactAddBtn"
+                          type="button"
+                          title="Arm artifact selection, then drag on the plot to mark a window"
+                          aria-pressed="false"
+                        >
+                          +
+                        </button>
+                        <button
+                          class="artifact-btn"
+                          id="artifactRemoveBtn"
+                          type="button"
+                          title="Remove the last artifact window"
+                        >
+                          −
+                        </button>
+                        <span class="artifact-count" id="artifactCount">0</span>
+                      </div>
                       <canvas id="emgCanvas" height="180"></canvas>
                     </div>
                     <div class="chart-card glass">
@@ -865,6 +903,6 @@
       </main>
     </div>
 
-    <script type="module" src="app.js?v=62"></script>
+    <script type="module" src="app.js?v=64"></script>
   </body>
 </html>

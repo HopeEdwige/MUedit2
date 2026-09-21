@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
-import numpy as np
+from muedit.models import BoolArray, FloatArray, IntArray, SignalImport
 
-#: Default number of extension channels used to derive the convolutive
-#: extension factor (``ex_factor = nbextchan / n_channels``). Shared by the
-#: offline decomposition parameters, the editing endpoints, and the CLI so the
-#: default stays consistent across entry points.
 DEFAULT_NBEXTCHAN: int = 1000
-
-#: Default peel-off window (seconds) for MU waveform subtraction. Shared by the
-#: decomposition parameters, the editing endpoints, the API schema, and the CLI
-#: (which expresses it in milliseconds as ``DEFAULT_PEEL_OFF_WIN_SEC * 1000``).
 DEFAULT_PEEL_OFF_WIN_SEC: float = 0.025
+
+ContrastFunc: TypeAlias = Literal["skew", "kurtosis", "logcosh"]
+"""FastICA contrast function applied in the fixed-point iteration."""
+
+PostprocessMode: TypeAlias = Literal["windowed", "full-trace", "adaptive"]
+"""Post-processing route; must match POSTPROCESS_MODES in the frontend."""
+
+POSTPROCESS_MODES: dict[PostprocessMode, dict[str, bool]] = {
+    "windowed": {"use_adaptive": False, "full_trace": False},
+    "full-trace": {"use_adaptive": False, "full_trace": True},
+    "adaptive": {"use_adaptive": True, "full_trace": False},
+}
+
+DEFAULT_POSTPROCESS_MODE: PostprocessMode = "windowed"
 
 
 @dataclass
@@ -29,11 +35,11 @@ class DecompositionParameters:
     random_seed: int = 0
     peel_off_enabled: bool = False
     covfilter: bool = False
-    duplicatesbgrids: bool = False
+    duplicatesbgrids: bool = True
     nbextchan: int = DEFAULT_NBEXTCHAN
     edges_sec: float = 0.2
-    contrast_func: str = "skew"
-    sil_thr: float = 0.88
+    contrast_func: ContrastFunc = "skew"
+    sil_thr: float = 0.9
     cov_thr: float = 0.5
     peel_off_win: float = DEFAULT_PEEL_OFF_WIN_SEC
     duplicatesthresh: float = 0.3
@@ -41,7 +47,13 @@ class DecompositionParameters:
     adapt_batch_ms: int = 100
     adapt_wh: bool = True
     adapt_sv: bool = True
+    adapt_sd: bool = True
+    adapt_wh_learning_rate: float = 7e-3
+    adapt_sv_learning_rate: float = 3e-3
+    adapt_cov_alpha: float = 0.1
+    adapt_spike_prev_weight: int = 5
     full_trace: bool = False
+    auto_mask_artifacts: bool = False
 
 
 @dataclass
@@ -50,8 +62,8 @@ class LoadStepOutput:
 
     full_path: str
     filename: str
-    signal: dict[str, Any]
-    data: np.ndarray
+    signal: SignalImport
+    data: FloatArray
     fsamp: float
 
 
@@ -59,40 +71,41 @@ class LoadStepOutput:
 class PreprocessStepOutput:
     """Filtered signal and grid metadata ready for ICA decomposition."""
 
-    signal: dict[str, Any]
-    data: np.ndarray
+    signal: SignalImport
+    data: FloatArray
     fsamp: float
     grid_names: list[str]
-    coordinates: list[np.ndarray]
+    coordinates: list[FloatArray]
     ied: list[float]
-    discard_channels: list[np.ndarray]
+    discard_channels: list[IntArray]
     muscles: list[str]
     loader_meta: dict[str, Any]
     roi_list: list[tuple[int, int]]
     ngrid: int
     coordinates_plateau: list[int]
+    artifact_mask: BoolArray | None = None
+    bad_channel_masks: list[BoolArray] | None = None
 
 
 @dataclass
 class DecomposeStepOutput:
     """ICA filters and per-window SIL scores produced by the decompose step."""
 
-    mu_filters: dict[int, np.ndarray]
-    w_sig: dict[int, np.ndarray]
-    win_data: dict[int, np.ndarray]
-    whiten_mat: dict[int, np.ndarray]
+    mu_filters: dict[int, FloatArray]
+    whiten_mat: dict[int, FloatArray]
     coordinates_plateau: list[int]
     sil_by_window: dict[int, list[float]]
     mu_grid_index: list[int]
-    win_means: dict[int, np.ndarray]
+    win_means: dict[int, FloatArray]
 
 
 @dataclass
 class PostprocessStepOutput:
     """Deduplicated pulse trains and discharge times after post-processing."""
 
-    pulse_t: np.ndarray
-    distime: list[np.ndarray]
+    pulse_t: FloatArray
+    distime: list[IntArray]
     mu_grid_index: list[int]
     sil_by_window: dict[int, list[float]]
-    adaptive_losses: dict[str, Any]
+    sil: list[float]
+    adaptive_losses: dict[int, Any]

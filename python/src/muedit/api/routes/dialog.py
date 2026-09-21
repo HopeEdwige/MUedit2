@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/dialog")
 
-_EXTENSIONS = ["mat", "otb+", "otb4", "npz", "bdf", "edf"]
+_EXTENSIONS = ["mat", "otb+", "otb4", "npz", "bdf", "edf", "rhd"]
 
 
 def _open_dialog_macos() -> str | None:
@@ -24,17 +24,18 @@ def _open_dialog_macos() -> str | None:
     ext_list = "{" + ", ".join(f'".{e}"' for e in _EXTENSIONS) + "}"
     script = (
         'tell application "System Events"\n'
-        '  activate\n'
+        "  activate\n"
         f'  set f to choose file with prompt "Select EMG signal or decomposition file" '
-        f'of type {ext_list}\n'
-        '  return POSIX path of f\n'
-        'end tell'
+        f"of type {ext_list}\n"
+        "  return POSIX path of f\n"
+        "end tell"
     )
     result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
     path = result.stdout.strip()
     return path if path else None
@@ -53,10 +54,11 @@ try:
     path = filedialog.askopenfilename(
         title='Select EMG signal or decomposition file',
         filetypes=[
-            ('EMG signal files', '*.mat *.otb+ *.otb4 *.npz *.bdf *.edf'),
+            ('EMG signal files', '*.mat *.otb+ *.otb4 *.npz *.bdf *.edf *.rhd'),
             ('MATLAB files', '*.mat'),
             ('OTB files', '*.otb+ *.otb4'),
             ('BIDS EMG files', '*.bdf *.edf'),
+            ('Intan RHD files', '*.rhd'),
             ('Decomposition files', '*.npz'),
             ('All files', '*'),
         ],
@@ -74,12 +76,13 @@ def _open_dialog_tkinter() -> str | None:
     kwargs: dict = {}
     if sys.platform == "win32":
         # Suppress the console window that would briefly flash on Windows
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     result = subprocess.run(
         [sys.executable, "-c", _TKINTER_SCRIPT],
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
         **kwargs,
     )
     if result.returncode != 0:

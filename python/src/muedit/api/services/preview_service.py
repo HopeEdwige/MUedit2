@@ -7,33 +7,34 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException
 from fastapi.responses import Response
 
 from muedit.api.cache import (
-    PREVIEW_MOVING_AVG_MS,
-    _envelope_bins,
     _get_qc_signal,
-    _moving_average_ms,
-    _raw_series_at_fs,
     _store_qc_signal,
     _store_upload_signal,
 )
 from muedit.api.common import (
     make_json_safe,
     parse_entity_label,
-    safe_unlink,
-    save_upload_to_temp,
+    require_existing_path,
 )
-from muedit.api.schemas import QcWindowPayload
+from muedit.api.schemas import QcAutoPayload, QcWindowPayload
 from muedit.api.services.bids_helpers import (
     _infer_bids_root_from_decomp_path,
     read_bids_sidecar_meta,
 )
 from muedit.decomp.preview import downsample_vector
-from muedit.io.factory import clone_signal, load_signal
+from muedit.io.factory import get_loader, load_signal
+from muedit.signal.downsample import (
+    PREVIEW_MOVING_AVG_MS,
+    moving_average_ms,
+    raw_series_at_fs,
+)
 from muedit.signal.filters import bandpass_signals
 from muedit.signal.grid import format_hdemg_signal
+from muedit.signal.qc_pipeline import run_auto_qc
 
 
 def _encode_qc_raw_f32(
@@ -68,13 +69,14 @@ def _encode_qc_raw_f32(
 
 def _build_preview_core(filepath: str) -> dict[str, Any]:
     """Load signal, preprocess EMG grids, cache QC data, and build UI preview payload."""
-    loaded_signal = load_signal(filepath)
-    upload_token = _store_upload_signal(loaded_signal)
-    signal = clone_signal(loaded_signal)
-    data = signal["data"]
-    fsamp = float(signal["fsamp"])
+    signal = load_signal(filepath)
+    # The cache stores its own copy, so filtering ``signal.data`` in place below
+    # leaves the cached raw signal untouched.
+    upload_token = _store_upload_signal(signal, source_path=filepath)
+    data = signal.data
+    fsamp = signal.fsamp
 
-    grid_names = signal.get("gridname", ["Default"])
+    grid_names = signal.gridname
     coordinates, _, discard_channels, emg_type = format_hdemg_signal(grid_names)
 
     ch_idx = 0
@@ -89,7 +91,7 @@ def _build_preview_core(filepath: str) -> dict[str, Any]:
 
     _store_qc_signal(upload_token, data, fsamp, grid_names, discard_channels)
 
-    mean_abs = _moving_average_ms(np.mean(np.abs(data), axis=0), fsamp, PREVIEW_MOVING_AVG_MS)
+    mean_abs = moving_average_ms(np.mean(np.abs(data), axis=0), fsamp, PREVIEW_MOVING_AVG_MS)
     mean_abs_downsampled = downsample_vector(mean_abs, fsamp)
 
     grid_means = []
@@ -98,7 +100,7 @@ def _build_preview_core(filepath: str) -> dict[str, Any]:
     for i in range(len(grid_names)):
         n_channels_grid = len(discard_channels[i])
         grid_data = data[ch_idx : ch_idx + n_channels_grid, :]
-        grid_mean_abs = _moving_average_ms(
+        grid_mean_abs = moving_average_ms(
             np.mean(np.abs(grid_data), axis=0), fsamp, PREVIEW_MOVING_AVG_MS
         )
         grid_means.append(downsample_vector(grid_mean_abs, fsamp))
@@ -115,17 +117,12 @@ def _build_preview_core(filepath: str) -> dict[str, Any]:
             "fsamp": fsamp,
             "channel_means": channel_means,
             "coordinates": [coords.tolist() for coords in coordinates],
-            "metadata": signal.get("metadata", {}),
-            "muscle": signal.get("muscle", []),
-            "auxiliary": (
-                [
-                    downsample_vector(signal["auxiliary"][i, :], fsamp)
-                    for i in range(signal["auxiliary"].shape[0])
-                ]
-                if signal.get("auxiliary") is not None and signal["auxiliary"].size > 0
-                else []
-            ),
-            "auxiliary_names": signal.get("auxiliaryname", []),
+            "metadata": signal.metadata,
+            "muscle": signal.muscle,
+            "auxiliary": [downsample_vector(row, fsamp) for row in signal.auxiliary]
+            if signal.auxiliary.size > 0
+            else [],
+            "auxiliary_names": signal.auxiliaryname,
         }
     )
 
@@ -140,21 +137,13 @@ def _decomp_artifact_error(field: str) -> HTTPException:
     )
 
 
-async def build_preview(file: UploadFile) -> dict[str, Any]:
-    """Build preview payload from uploaded file contents."""
-    tmp_path = await save_upload_to_temp(file)
-    try:
-        return _build_preview_core(tmp_path)
-    except (OSError, ValueError) as exc:
-        if "contains decomposition fields" in str(exc):
-            raise _decomp_artifact_error("file") from exc
-        raise
-    finally:
-        safe_unlink(tmp_path)
-
-
 def build_preview_from_path(filepath: str) -> dict[str, Any]:
     """Build preview payload from a file path already available on disk."""
+    require_existing_path(filepath)
+    try:
+        get_loader(filepath)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"field": "path", "reason": str(exc)}) from exc
     try:
         result = _build_preview_core(filepath)
     except (OSError, ValueError) as exc:
@@ -168,37 +157,34 @@ def build_preview_from_path(filepath: str) -> dict[str, Any]:
         if bids_root is not None:
             entity_label = parse_entity_label(Path(filepath).name)
             result.update(read_bids_sidecar_meta(bids_root, entity_label))
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110
         pass  # best-effort; never block the preview on sidecar errors
 
     return result
 
 
-def get_qc_window(payload: QcWindowPayload) -> dict[str, Any] | Response:
-    """Return channel-window QC data from cached signal, JSON or binary."""
+def get_qc_window(payload: QcWindowPayload) -> Response:
+    """Return channel-window QC data from cached signal as packed float32 binary."""
     cached = _get_qc_signal(payload.upload_token)
     if cached is None:
         raise HTTPException(
             status_code=400,
             detail={
                 "field": "upload_token",
-                "reason": "Missing or expired QC cache; request /api/v1/preview first",
+                "reason": "Missing or expired QC cache; request /api/v1/preview-by-path first",
             },
         )
 
     grid_index = payload.grid_index
     start = payload.start
     end = payload.end
-    target_points = payload.target_points
     target_fs = payload.target_fs
-    representation = (payload.representation or "envelope").lower()
     channel_index_raw = payload.channel_index
 
-    data = cached["data"]
-    fsamp = float(cached["fsamp"])
-    offsets: list[int] = cached["channel_offsets"]
-    masks: list[np.ndarray] = cached["discard_channels"]
-    grid_names: list[str] = cached["grid_names"]
+    data = cached.data
+    fsamp = cached.fsamp
+    offsets = cached.channel_offsets
+    masks = cached.discard_channels
 
     if grid_index < 0 or grid_index >= len(offsets):
         raise HTTPException(status_code=400, detail="grid_index out of range")
@@ -213,73 +199,104 @@ def get_qc_window(payload: QcWindowPayload) -> dict[str, Any] | Response:
     grid_block = data[offset : offset + n_grid_ch, s:e]
 
     if channel_index_raw is None:
-        channels_payload = []
-        for ch_idx in range(n_grid_ch):
-            if representation == "raw":
-                series = _raw_series_at_fs(grid_block[ch_idx], fsamp, target_fs)
-                channels_payload.append({"channel_index": ch_idx, "series": series})
-            else:
-                mins, maxs = _envelope_bins(grid_block[ch_idx], target_points)
-                channels_payload.append({"channel_index": ch_idx, "min": mins, "max": maxs})
-        if representation == "raw":
-            payload_bytes = _encode_qc_raw_f32(
-                grid_index=grid_index,
-                channel_index=-1,
-                start=s,
-                end=e,
-                total_samples=total_samples,
-                fsamp=fsamp,
-                channels=channels_payload,
-            )
-            return Response(
-                content=payload_bytes,
-                media_type="application/octet-stream",
-                headers={"x-muedit-format": "qc-raw-f32-v1"},
-            )
-        return make_json_safe(
+        channels_payload = [
             {
-                "grid_index": grid_index,
-                "grid_name": grid_names[grid_index] if grid_index < len(grid_names) else "",
-                "start": s,
-                "end": e,
-                "total_samples": total_samples,
-                "fsamp": fsamp,
-                "representation": representation,
-                "channels": channels_payload,
+                "channel_index": ch_idx,
+                "series": raw_series_at_fs(grid_block[ch_idx], fsamp, target_fs),
             }
-        )
-
-    channel_index = channel_index_raw
-    if channel_index < 0 or channel_index >= n_grid_ch:
-        raise HTTPException(status_code=400, detail="channel_index out of range")
-    if representation == "raw":
-        series = _raw_series_at_fs(grid_block[channel_index], fsamp, target_fs)
+            for ch_idx in range(n_grid_ch)
+        ]
         payload_bytes = _encode_qc_raw_f32(
             grid_index=grid_index,
-            channel_index=channel_index,
+            channel_index=-1,
             start=s,
             end=e,
             total_samples=total_samples,
             fsamp=fsamp,
-            channels=[{"channel_index": channel_index, "series": series}],
+            channels=channels_payload,
         )
         return Response(
             content=payload_bytes,
             media_type="application/octet-stream",
             headers={"x-muedit-format": "qc-raw-f32-v1"},
         )
-    mins, maxs = _envelope_bins(grid_block[channel_index], target_points)
+
+    channel_index = channel_index_raw
+    if channel_index < 0 or channel_index >= n_grid_ch:
+        raise HTTPException(status_code=400, detail="channel_index out of range")
+    series = raw_series_at_fs(grid_block[channel_index], fsamp, target_fs)
+    payload_bytes = _encode_qc_raw_f32(
+        grid_index=grid_index,
+        channel_index=channel_index,
+        start=s,
+        end=e,
+        total_samples=total_samples,
+        fsamp=fsamp,
+        channels=[{"channel_index": channel_index, "series": series}],
+    )
+    return Response(
+        content=payload_bytes,
+        media_type="application/octet-stream",
+        headers={"x-muedit-format": "qc-raw-f32-v1"},
+    )
+
+
+def _mask_to_regions(mask: np.ndarray | None) -> list[list[int]]:
+    """Convert a boolean sample mask into contiguous ``[start, end)`` ranges."""
+    if mask is None or not mask.any():
+        return []
+    diff = np.diff(mask.astype(np.int8), prepend=0, append=0)
+    starts = np.flatnonzero(diff == 1)
+    ends = np.flatnonzero(diff == -1)
+    return [[int(s), int(e)] for s, e in zip(starts, ends, strict=True)]
+
+
+def run_auto_qc_on_token(payload: QcAutoPayload) -> dict[str, Any]:
+    """Run the automatic QC pipeline over the cached preview signal."""
+    cached = _get_qc_signal(payload.upload_token)
+    if cached is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "field": "upload_token",
+                "reason": "Missing or expired QC cache; request /api/v1/preview-by-path first",
+            },
+        )
+
+    fsamp = cached.fsamp
+    grid_names = cached.grid_names
+    coordinates, _, _, _ = format_hdemg_signal(grid_names)
+    grid_channel_counts = [int(c.shape[0]) for c in coordinates]
+    total_declared = sum(grid_channel_counts)
+
+    data = np.asarray(cached.data, dtype=np.float64)
+    if total_declared > data.shape[0]:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "field": "upload_token",
+                "reason": (
+                    f"Grid catalogue declares {total_declared} channels but the cached "
+                    f"signal has {data.shape[0]}"
+                ),
+            },
+        )
+
+    result = run_auto_qc(
+        data[:total_declared],
+        fsamp,
+        grid_channel_counts,
+        grid_coordinates=coordinates,
+    )
     return make_json_safe(
         {
-            "grid_index": grid_index,
-            "grid_name": grid_names[grid_index] if grid_index < len(grid_names) else "",
-            "channel_index": channel_index,
-            "start": s,
-            "end": e,
-            "total_samples": total_samples,
+            "bad_channels_per_grid": [
+                np.asarray(m, dtype=int).tolist() for m in result.bad_channel_masks
+            ],
+            "artifact_regions": _mask_to_regions(result.artifact_mask),
+            "artifact_samples": int(np.asarray(result.artifact_mask).sum()),
+            "total_samples": int(data.shape[1]),
             "fsamp": fsamp,
-            "representation": representation,
-            "min": mins,
-            "max": maxs,
+            "grid_names": grid_names,
         }
     )

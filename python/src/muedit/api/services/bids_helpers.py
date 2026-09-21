@@ -30,12 +30,12 @@ def _load_bids_grid(
 def _parse_all_bids_entities(entity_label: str) -> dict[str, str | None]:
     """Extract all BIDS key-value pairs from an entity label string."""
     keys = ("sub", "ses", "task", "acq", "run", "recording")
-    result: dict[str, str | None] = {k: None for k in keys}
+    result: dict[str, str | None] = dict.fromkeys(keys)
     for part in str(entity_label).split("_"):
         for k in keys:
             prefix = f"{k}-"
             if part.startswith(prefix) and len(part) > len(prefix):
-                result[k] = part[len(prefix):]
+                result[k] = part[len(prefix) :]
     return result
 
 
@@ -52,12 +52,7 @@ def _parse_subject_session_from_entity_label(entity_label: str) -> tuple[str, st
 
 
 def _infer_bids_root_from_decomp_path(filepath: str) -> Path | None:
-    """Infer the BIDS dataset root from a decomposition file path.
-
-    Handles both the current ``derivatives/muedit/sub-X/...`` layout and the
-    legacy ``sub-X/...`` layout, falling back to a ``muedit_out`` marker.
-    Returns ``None`` when no root can be determined.
-    """
+    """Infer the BIDS dataset root from a decomposition file path."""
     raw = str(filepath or "")
     if not raw:
         return None
@@ -109,12 +104,7 @@ def _grid_sort_key(group: str) -> tuple[int, str]:
 
 
 def _read_bids_channels_sidecar(channels_path: Path) -> tuple[list[str], list[str], float | None]:
-    """Parse a channels.tsv into ordered grid names, target muscles, and sampling rate.
-
-    Considers only EMG-type rows, dedupes by grid ``group`` (first row wins),
-    orders groups via :func:`_grid_sort_key`, and trims trailing empty muscle
-    entries. Returns ``([], [], fsamp_or_None)`` when no EMG rows are present.
-    """
+    """Parse a channels.tsv into ordered grid names, target muscles, and sampling rate."""
     by_group: dict[str, tuple[str, str]] = {}
     fsamp: float | None = None
     with channels_path.open("r", encoding="utf-8") as handle:
@@ -148,15 +138,7 @@ def _read_bids_channels_sidecar(channels_path: Path) -> tuple[list[str], list[st
 
 
 def read_bids_sidecar_meta(bids_root: Path, entity_label: str) -> dict[str, Any]:
-    """Read participant and hardware metadata from BIDS sidecars for an entity.
-
-    Returns a flat mapping ready to merge into a loaded-decomposition or preview
-    payload: a nested ``participant_meta`` (age/sex/handedness) read from
-    ``participants.tsv`` plus the hardware/recording fields round-tripped from the
-    ``_emg.json`` sidecar. Missing files simply contribute no keys. I/O and parse
-    errors are intentionally left to propagate so callers can decide whether the
-    enrichment is best-effort.
-    """
+    """Read participant and hardware metadata from BIDS sidecars for an entity."""
     subject, session = _parse_subject_session_from_entity_label(entity_label)
     meta: dict[str, Any] = {}
 
