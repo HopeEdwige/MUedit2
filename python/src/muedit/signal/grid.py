@@ -1,27 +1,22 @@
-"""Grid layout inference and basic signal helpers."""
+"""Electrode grid catalogue: channel layouts, coordinates and BIDS electrode metadata."""
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
+from itertools import accumulate, pairwise
 
 import numpy as np
 
+from muedit.errors import MueditError
 from muedit.models import FloatArray, IntArray
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
 class GridSpec:
-    """Complete specification for one electrode grid model.
-
-    To add a new grid, append an entry to ``_GRID_CATALOG`` below and
-    fill in every field — no other file needs to change.
-    """
+    """Complete specification for one electrode grid model; a new grid needs only its entry below."""
 
     channel_map: IntArray  # 2-D layout; 0 = no electrode at that position
-    nbelectrodes: int  # total active electrode count
+    n_channels: int  # total active electrode count
     ied: float  # inter-electrode distance in mm
     emg_type: int  # 1 = surface HD-EMG, 2 = intramuscular
     manufacturer: str  # BIDS ElectrodeManufacturer
@@ -29,28 +24,60 @@ class GridSpec:
     electrode_material: str  # BIDS ElectrodeMaterial
 
 
+# Layouts shared by the grids of one shape, at either inter-electrode distance.
+_GR_1305 = np.array(
+    [
+        [0, 25, 26, 51, 52],
+        [1, 24, 27, 50, 53],
+        [2, 23, 28, 49, 54],
+        [3, 22, 29, 48, 55],
+        [4, 21, 30, 47, 56],
+        [5, 20, 31, 46, 57],
+        [6, 19, 32, 45, 58],
+        [7, 18, 33, 44, 59],
+        [8, 17, 34, 43, 60],
+        [9, 16, 35, 42, 61],
+        [10, 15, 36, 41, 62],
+        [11, 14, 37, 40, 63],
+        [12, 13, 38, 39, 64],
+    ]
+)
+_HD_1305 = np.array(
+    [
+        [52, 39, 26, 13, 0],
+        [53, 40, 27, 14, 1],
+        [54, 41, 28, 15, 2],
+        [55, 42, 29, 16, 3],
+        [56, 43, 30, 17, 4],
+        [57, 44, 31, 18, 5],
+        [58, 45, 32, 19, 6],
+        [59, 46, 33, 20, 7],
+        [60, 47, 34, 21, 8],
+        [61, 48, 35, 22, 9],
+        [62, 49, 36, 23, 10],
+        [63, 50, 37, 24, 11],
+        [64, 51, 38, 25, 12],
+    ]
+)
+_GR_0808 = np.array(
+    [
+        [8, 16, 24, 32, 40, 48, 56, 64],
+        [7, 15, 23, 31, 39, 47, 55, 63],
+        [6, 14, 22, 30, 38, 46, 54, 62],
+        [5, 13, 21, 29, 37, 45, 53, 61],
+        [4, 12, 20, 28, 36, 44, 52, 60],
+        [3, 11, 19, 27, 35, 43, 51, 59],
+        [2, 10, 18, 26, 34, 42, 50, 58],
+        [1, 9, 17, 25, 33, 41, 49, 57],
+    ]
+)
+
 # ── Grid catalogue ────────────────────────────────────────────────────────────
 _GRID_CATALOG: dict[str, GridSpec] = {
     # ── OTBioelettronica 13×5 grids (64 ch) ─────────────────────────────────
     "GR04MM1305": GridSpec(
-        channel_map=np.array(
-            [
-                [0, 25, 26, 51, 52],
-                [1, 24, 27, 50, 53],
-                [2, 23, 28, 49, 54],
-                [3, 22, 29, 48, 55],
-                [4, 21, 30, 47, 56],
-                [5, 20, 31, 46, 57],
-                [6, 19, 32, 45, 58],
-                [7, 18, 33, 44, 59],
-                [8, 17, 34, 43, 60],
-                [9, 16, 35, 42, 61],
-                [10, 15, 36, 41, 62],
-                [11, 14, 37, 40, 63],
-                [12, 13, 38, 39, 64],
-            ]
-        ),
-        nbelectrodes=64,
+        channel_map=_GR_1305,
+        n_channels=64,
         ied=4.0,
         emg_type=1,
         manufacturer="OTBioelettronica",
@@ -58,24 +85,8 @@ _GRID_CATALOG: dict[str, GridSpec] = {
         electrode_material="gold coated",
     ),
     "HD04MM1305": GridSpec(
-        channel_map=np.array(
-            [
-                [52, 39, 26, 13, 0],
-                [53, 40, 27, 14, 1],
-                [54, 41, 28, 15, 2],
-                [55, 42, 29, 16, 3],
-                [56, 43, 30, 17, 4],
-                [57, 44, 31, 18, 5],
-                [58, 45, 32, 19, 6],
-                [59, 46, 33, 20, 7],
-                [60, 47, 34, 21, 8],
-                [61, 48, 35, 22, 9],
-                [62, 49, 36, 23, 10],
-                [63, 50, 37, 24, 11],
-                [64, 51, 38, 25, 12],
-            ]
-        ),
-        nbelectrodes=64,
+        channel_map=_HD_1305,
+        n_channels=64,
         ied=4.0,
         emg_type=1,
         manufacturer="OTBioelettronica",
@@ -83,24 +94,8 @@ _GRID_CATALOG: dict[str, GridSpec] = {
         electrode_material="gold coated",
     ),
     "GR08MM1305": GridSpec(
-        channel_map=np.array(
-            [
-                [0, 25, 26, 51, 52],
-                [1, 24, 27, 50, 53],
-                [2, 23, 28, 49, 54],
-                [3, 22, 29, 48, 55],
-                [4, 21, 30, 47, 56],
-                [5, 20, 31, 46, 57],
-                [6, 19, 32, 45, 58],
-                [7, 18, 33, 44, 59],
-                [8, 17, 34, 43, 60],
-                [9, 16, 35, 42, 61],
-                [10, 15, 36, 41, 62],
-                [11, 14, 37, 40, 63],
-                [12, 13, 38, 39, 64],
-            ]
-        ),
-        nbelectrodes=64,
+        channel_map=_GR_1305,
+        n_channels=64,
         ied=8.0,
         emg_type=1,
         manufacturer="OTBioelettronica",
@@ -108,24 +103,8 @@ _GRID_CATALOG: dict[str, GridSpec] = {
         electrode_material="gold coated",
     ),
     "HD08MM1305": GridSpec(
-        channel_map=np.array(
-            [
-                [52, 39, 26, 13, 0],
-                [53, 40, 27, 14, 1],
-                [54, 41, 28, 15, 2],
-                [55, 42, 29, 16, 3],
-                [56, 43, 30, 17, 4],
-                [57, 44, 31, 18, 5],
-                [58, 45, 32, 19, 6],
-                [59, 46, 33, 20, 7],
-                [60, 47, 34, 21, 8],
-                [61, 48, 35, 22, 9],
-                [62, 49, 36, 23, 10],
-                [63, 50, 37, 24, 11],
-                [64, 51, 38, 25, 12],
-            ]
-        ),
-        nbelectrodes=64,
+        channel_map=_HD_1305,
+        n_channels=64,
         ied=8.0,
         emg_type=1,
         manufacturer="OTBioelettronica",
@@ -134,19 +113,8 @@ _GRID_CATALOG: dict[str, GridSpec] = {
     ),
     # ── Neuromotion 8×8 grids (64 ch) ──────────────────────────────────
     "GR10MM0808": GridSpec(
-        channel_map=np.array(
-            [
-                [8, 16, 24, 32, 40, 48, 56, 64],
-                [7, 15, 23, 31, 39, 47, 55, 63],
-                [6, 14, 22, 30, 38, 46, 54, 62],
-                [5, 13, 21, 29, 37, 45, 53, 61],
-                [4, 12, 20, 28, 36, 44, 52, 60],
-                [3, 11, 19, 27, 35, 43, 51, 59],
-                [2, 10, 18, 26, 34, 42, 50, 58],
-                [1, 9, 17, 25, 33, 41, 49, 57],
-            ]
-        ),
-        nbelectrodes=64,
+        channel_map=_GR_0808,
+        n_channels=64,
         ied=10.0,
         emg_type=1,
         manufacturer="Neuromotion",
@@ -166,7 +134,7 @@ _GRID_CATALOG: dict[str, GridSpec] = {
                 [57, 49, 41, 33, 25, 17, 9, 1],
             ]
         ),
-        nbelectrodes=64,
+        n_channels=64,
         ied=10.0,
         emg_type=1,
         manufacturer="OTBioelettronica",
@@ -175,19 +143,8 @@ _GRID_CATALOG: dict[str, GridSpec] = {
     ),
     # ── OTBioelettronica 8×8 grid, 8 mm IED (64 ch) ──────────────────────────
     "GR08MM0808": GridSpec(
-        channel_map=np.array(
-            [
-                [8, 16, 24, 32, 40, 48, 56, 64],
-                [7, 15, 23, 31, 39, 47, 55, 63],
-                [6, 14, 22, 30, 38, 46, 54, 62],
-                [5, 13, 21, 29, 37, 45, 53, 61],
-                [4, 12, 20, 28, 36, 44, 52, 60],
-                [3, 11, 19, 27, 35, 43, 51, 59],
-                [2, 10, 18, 26, 34, 42, 50, 58],
-                [1, 9, 17, 25, 33, 41, 49, 57],
-            ]
-        ),
-        nbelectrodes=64,
+        channel_map=_GR_0808,
+        n_channels=64,
         ied=8.0,
         emg_type=1,
         manufacturer="OTBioelettronica",
@@ -208,7 +165,7 @@ _GRID_CATALOG: dict[str, GridSpec] = {
                 [25, 17, 9, 1],
             ]
         ),
-        nbelectrodes=32,
+        n_channels=32,
         ied=10.0,
         emg_type=1,
         manufacturer="OTBioelettronica",
@@ -228,7 +185,7 @@ _GRID_CATALOG: dict[str, GridSpec] = {
                 [8, 16, 24, 32],
             ]
         ),
-        nbelectrodes=32,
+        n_channels=32,
         ied=10.0,
         emg_type=1,
         manufacturer="OTBioelettronica",
@@ -236,40 +193,43 @@ _GRID_CATALOG: dict[str, GridSpec] = {
         electrode_material="gold coated",
     ),
     # ── camber – Emory University intramuscular arrays (32 ch) ──────────────
+    # One column per thread, in Open Ephys GUI channels (Myomatrix "Open Ephys GUI pinout").
     "MYOMRF-4x8": GridSpec(
         channel_map=np.array(
             [
-                [25, 1, 16, 24],
-                [26, 2, 15, 23],
-                [27, 3, 14, 22],
-                [28, 4, 13, 21],
-                [29, 5, 12, 20],
-                [30, 6, 11, 19],
-                [31, 7, 10, 18],
-                [32, 8, 9, 17],
+                [25, 1, 9, 17],
+                [26, 2, 10, 18],
+                [27, 3, 11, 19],
+                [28, 4, 12, 20],
+                [29, 5, 13, 21],
+                [30, 6, 14, 22],
+                [31, 7, 15, 23],
+                [32, 8, 16, 24],
             ]
         ),
-        nbelectrodes=32,
+        n_channels=32,
         ied=1.0,
         emg_type=2,
         manufacturer="camber - Emory University",
         electrode_type="intramuscular array",
         electrode_material="gold coated",
     ),
+    # One thread folded into its four 8-contact groups, in Open Ephys GUI channels
+    # from the ZIF end to the tip (Myomatrix "Open Ephys GUI pinout").
     "MYOMNP-1x32": GridSpec(
         channel_map=np.array(
             [
-                [24, 25, 16, 1],
-                [23, 26, 15, 2],
-                [22, 27, 14, 3],
-                [21, 28, 13, 4],
-                [20, 29, 12, 5],
-                [19, 30, 11, 6],
-                [18, 31, 10, 7],
-                [17, 32, 9, 8],
+                [24, 16, 25, 1],
+                [23, 15, 26, 2],
+                [22, 14, 27, 3],
+                [21, 13, 28, 4],
+                [20, 12, 29, 5],
+                [19, 11, 30, 6],
+                [18, 10, 31, 7],
+                [17, 9, 32, 8],
             ]
         ),
-        nbelectrodes=32,
+        n_channels=32,
         ied=1.0,
         emg_type=2,
         manufacturer="camber - Emory University",
@@ -295,7 +255,7 @@ _GRID_CATALOG: dict[str, GridSpec] = {
                 [61, 63, 24, 22, 15],
             ]
         ),
-        nbelectrodes=64,
+        n_channels=64,
         ied=8.0,
         emg_type=1,
         manufacturer="OTBioelettronica",
@@ -314,6 +274,27 @@ def _find_spec(grid_name: str) -> GridSpec | None:
     return None
 
 
+def grid_spec(grid_name: str) -> GridSpec:
+    """The catalogue entry of *grid_name*; raises for a grid the catalogue does not know."""
+    spec = _find_spec(grid_name)
+    if spec is None:
+        raise MueditError(
+            f"Unknown grid model '{grid_name}'. "
+            "Add an entry to _GRID_CATALOG in signal/grid.py or correct the grid name."
+        )
+    return spec
+
+
+def fallback_grid_name(index: int) -> str:
+    """Name of grid ``index`` when the source gives none; ``Grid<n>`` is also a valid BIDS label."""
+    return f"Grid{index + 1}"
+
+
+def is_known_grid(grid_name: str) -> bool:
+    """Whether :func:`format_hdemg_signal` can lay out *grid_name*."""
+    return _find_spec(grid_name or "") is not None
+
+
 def format_hdemg_signal(
     grid_names: list[str],
     discard_overrides: list[list[int]] | None = None,
@@ -321,53 +302,53 @@ def format_hdemg_signal(
     """Infer grid geometry and channel masks for HD-EMG recordings."""
     coordinates: list[FloatArray] = []
     ied: list[float] = []
-    discard_channels_vec: list[IntArray] = []
-    emg_type: list[int] = []
+    discard_channels: list[IntArray] = []
+    emg_types: list[int] = []
 
     for i, grid_name in enumerate(grid_names):
-        spec = _find_spec(grid_name)
-
-        if spec is None:
-            raise ValueError(
-                f"Unknown grid model '{grid_name}'. "
-                "Add an entry to _GRID_CATALOG in signal/grid.py or correct the grid name."
-            )
-
-        el_channel_map = spec.channel_map
-        nbelectrodes = spec.nbelectrodes
-        current_ied = spec.ied
-        current_emg_type = spec.emg_type
-
-        coords = np.zeros((nbelectrodes, 2))
-        rows, cols = el_channel_map.shape
-        for r in range(rows):
-            for c in range(cols):
-                val = el_channel_map[r, c]
-                if 0 < val <= nbelectrodes:
-                    coords[val - 1, 0] = r
-                    coords[val - 1, 1] = c
+        spec = grid_spec(grid_name)
+        n_channels = spec.n_channels
+        rows, cols = np.nonzero((spec.channel_map > 0) & (spec.channel_map <= n_channels))
+        coords = np.zeros((n_channels, 2))
+        coords[spec.channel_map[rows, cols] - 1] = np.column_stack([rows, cols])
 
         coordinates.append(coords)
-        ied.append(current_ied)
-        emg_type.append(current_emg_type)
+        ied.append(spec.ied)
+        emg_types.append(spec.emg_type)
 
-        discard_mask = np.zeros(nbelectrodes, dtype=int)
+        discard_mask = np.zeros(n_channels, dtype=int)
         if discard_overrides and i < len(discard_overrides):
             mask_arr = np.array(discard_overrides[i], dtype=int)
-            if mask_arr.size != nbelectrodes:
-                raise ValueError(
+            if mask_arr.size != n_channels:
+                raise MueditError(
                     f"discard_overrides[{i}] has {mask_arr.size} elements but "
-                    f"grid '{grid_name}' has {nbelectrodes} channels. "
+                    f"grid '{grid_name}' has {n_channels} channels. "
                     f"Provide a full-length binary mask (1 = discard, 0 = keep)."
                 )
             discard_mask = mask_arr
 
-        discard_channels_vec.append(discard_mask)
+        discard_channels.append(discard_mask)
 
-    return coordinates, ied, discard_channels_vec, emg_type
+    return coordinates, ied, discard_channels, emg_types
 
 
-def get_grid_electrode_metadata(grid_name: str) -> dict:
+def grid_rows(grid_counts: list[int], n_rows: int | None = None) -> list[slice]:
+    """Each grid's rows in the stacked signal, cut at ``n_rows`` when the signal has fewer."""
+    bounds = [0, *accumulate(grid_counts)]
+    limit = bounds[-1] if n_rows is None else n_rows
+    return [slice(min(first, limit), min(stop, limit)) for first, stop in pairwise(bounds)]
+
+
+def kept_rows(discard_channels: list[IntArray]) -> list[IntArray]:
+    """Rows of each grid's kept (not discarded) channels in the stacked signal."""
+    rows = grid_rows([len(mask) for mask in discard_channels])
+    return [
+        grid.start + np.flatnonzero(np.asarray(mask) == 0)
+        for grid, mask in zip(rows, discard_channels, strict=True)
+    ]
+
+
+def get_grid_electrode_metadata(grid_name: str) -> dict[str, str]:
     """Return BIDS electrode metadata for the given grid model name."""
     spec = _find_spec(grid_name or "")
     if spec is None:

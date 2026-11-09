@@ -1,103 +1,99 @@
-"""Editing endpoints for decomposition artifacts."""
+"""Edit-stage endpoints: the server-side edit session, and saves."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, Path, Query
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
+from pydantic import ValidationError
 
-from muedit.api.contracts import success_payload
+from muedit.api.common import request_session, success_payload
 from muedit.api.schemas import (
-    EditDeduplicatePayload,
-    EditFilterPayload,
-    EditFlagPayload,
-    EditOutliersPayload,
-    EditRoiPayload,
+    EDIT_OPS,
+    EditPrepareGridPayload,
+    EditRecoverPayload,
     EditSavePayload,
+    EditSessionSavePayload,
     PathPayload,
 )
 from muedit.api.services.editing_service import (
-    add_artifact,
-    add_spikes,
-    delete_dr,
-    delete_spikes,
-    flag_mu,
-    load_decomposition_binary_from_path,
-    load_decomposition_from_path,
-    remove_duplicates_service,
-    remove_outliers,
+    apply_edit,
+    edit_session_state,
+    open_edit_session,
+    prepare_edit_grid,
+    recover_edits,
+    save_edit_session,
     save_edits,
-    update_filter,
 )
+from muedit.errors import MueditError
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", dependencies=[Depends(request_session)])
+
+_OP_PATTERN = "^(" + "|".join(EDIT_OPS) + ")$"
 
 
-@router.post("/edit/load-by-path", response_model=None)
-async def load_decomposition_by_path_endpoint(
-    request: Request, payload: PathPayload
-) -> dict[str, Any] | Response:
-    """Load a decomposition from an absolute/local path for edit mode."""
-    path = payload.path
-    if not path:
-        raise HTTPException(status_code=400, detail="path is required")
-    wants_binary = request.headers.get("x-muedit-binary", "1") != "0"
-    if wants_binary:
-        return load_decomposition_binary_from_path(path)
-    return success_payload(load_decomposition_from_path(path))
+@router.post("/edit/session/open")
+def open_session_endpoint(
+    payload: PathPayload, session: str = Depends(request_session)
+) -> Response:
+    """Open a decomposition for editing (MUB1: its fields, then CSR discharge times and artifacts)."""
+    if not payload.path:
+        raise MueditError("path is required", "path")
+    return open_edit_session(payload.path, session)
+
+
+@router.get("/edit/session")
+def session_state_endpoint(
+    token: str = Query(...), session: str = Depends(request_session)
+) -> Response:
+    """The whole state of an open edit session, for a page reloaded while it was open."""
+    return edit_session_state(token, session)
+
+
+@router.post("/edit/session/recover")
+def recover_endpoint(
+    payload: EditRecoverPayload, session: str = Depends(request_session)
+) -> Response:
+    """Replay (``apply``) or drop the unsaved edits a previous session left for the file."""
+    return recover_edits(payload, session)
+
+
+@router.post("/edit/session/prepare-grid")
+def prepare_grid_endpoint(
+    payload: EditPrepareGridPayload, session: str = Depends(request_session)
+) -> dict[str, Any]:
+    """Filter a grid's EMG ahead of its first filter update; answers once it is done."""
+    prepare_edit_grid(payload, session)
+    return success_payload({"grid": payload.grid})
+
+
+@router.post("/edit/session/save")
+def save_session_endpoint(
+    payload: EditSessionSavePayload, session: str = Depends(request_session)
+) -> dict[str, Any]:
+    """Save the session's edits; the request carries only the session form's fields."""
+    return success_payload(save_edit_session(payload, session))
+
+
+@router.post("/edit/ops/{op}")
+def edit_op_endpoint(
+    body: dict[str, Any],
+    op: str = Path(..., pattern=_OP_PATTERN),
+    session: str = Depends(request_session),
+) -> Response:
+    """Apply one edit, its body checked against ``EDIT_OPS[op]`` (MUB1: what changed)."""
+    try:
+        payload = EDIT_OPS[op].model_validate(body)
+    except ValidationError as exc:
+        raise RequestValidationError(
+            [{**err, "loc": ("body", *err["loc"])} for err in exc.errors(include_url=False)]
+        ) from exc
+    return apply_edit(op, payload, session)
 
 
 @router.post("/edit/save")
-async def save_edits_endpoint(payload: EditSavePayload) -> dict[str, Any]:
-    """Persist edited decomposition to BIDS source tree."""
-    result = save_edits(payload)
-    return success_payload(result)
-
-
-@router.post("/edit/update-filter")
-async def update_filter_endpoint(payload: EditFilterPayload) -> dict[str, Any]:
-    """Recompute MU filter segment from raw BIDS EMG for one motor unit."""
-    return success_payload(update_filter(payload))
-
-
-@router.post("/edit/add-spikes")
-async def add_spikes_endpoint(payload: EditRoiPayload) -> dict[str, Any]:
-    """Add spikes inside the selected ROI using pulse-train thresholds."""
-    return success_payload(add_spikes(payload))
-
-
-@router.post("/edit/add-artifact")
-async def add_artifact_endpoint(payload: EditRoiPayload) -> dict[str, Any]:
-    """Mark a peak in the ROI as an artifact; it will be excluded from filter updates."""
-    return success_payload(add_artifact(payload))
-
-
-@router.post("/edit/delete-spikes")
-async def delete_spikes_endpoint(payload: EditRoiPayload) -> dict[str, Any]:
-    """Delete spikes inside the selected ROI using pulse-train thresholds."""
-    return success_payload(delete_spikes(payload))
-
-
-@router.post("/edit/delete-dr")
-async def delete_dr_endpoint(payload: EditRoiPayload) -> dict[str, Any]:
-    """Delete high discharge-rate spikes inside the selected ROI."""
-    return success_payload(delete_dr(payload))
-
-
-@router.post("/edit/remove-outliers")
-async def remove_outliers_endpoint(payload: EditOutliersPayload) -> dict[str, Any]:
-    """Apply discharge-rate outlier removal for the selected motor unit."""
-    return success_payload(remove_outliers(payload))
-
-
-@router.post("/edit/remove-duplicates")
-async def remove_duplicates_endpoint(payload: EditDeduplicatePayload) -> dict[str, Any]:
-    """Remove duplicate motor units using lag-aware spike-train overlap."""
-    return success_payload(remove_duplicates_service(payload))
-
-
-@router.post("/edit/flag-mu")
-async def flag_mu_endpoint(payload: EditFlagPayload) -> dict[str, Any]:
-    """Flag or unflag a motor unit for deletion/review in edit workflow."""
-    return success_payload(flag_mu(payload))
+def save_edits_endpoint(payload: EditSavePayload) -> dict[str, Any]:
+    """Save a run: its discharge times and pulse trains stay on the server under its token."""
+    return success_payload(save_edits(payload))

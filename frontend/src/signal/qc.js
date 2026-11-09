@@ -1,246 +1,216 @@
+/**
+ * QC requests: automatic QC, the channel traces kept on view, and opening a
+ * raw file's preview.
+ */
 import {
-  ensureDiscardMasks,
   setArtifactMode,
   setArtifactRegions,
   setAuxData,
   setChannelMeans,
   setChannelTraceForGrid,
-  setChannelTraces,
   setCoordinates,
-  setDiscardMasks,
+  setDiscardChannels,
   setFsamp,
   setGridNames,
   setGridSeries,
   setMetadata,
-  setMuscle,
-  setQcWindowLoading,
-  setQcWindowLoadingForGrid,
+  setMuscleNames,
   setRois,
-  setPreviewSeries,
-  setSeriesLength,
+  setSegments,
+  setTotalSamples,
+  setTargetIndex,
   setUploadToken,
 } from "../state/actions.js";
-import { getCurrentGrid, roiStart, roiEnd } from "../state/selectors.js";
-import { nextFrame } from "../view/plots.js";
-import { errorMessage } from "../app/services/error-service.js";
-import { toSpans } from "../api/payloads.js";
+import { handleError } from "../app/services/error-service.js";
+import {
+  normalizePreviewPayload,
+  toAutoQc,
+  toSegments,
+} from "../api/payloads.js";
+import { syncRois } from "./segments.js";
+import { createViewFetcher } from "../app/services/view-fetcher.js";
+import { withUpload } from "../app/services/upload.js";
+import { beginRawPreviewTransition } from "../state/transitions.js";
 
 /** @typedef {import("../app/context.js").App} App */
-/** @typedef {import("../app/state.js").State} State */
-/** @typedef {import("../app/state.js").ChannelTrace} ChannelTrace */
-/** @typedef {{ channel_index?: number, series: ChannelTrace }} QcChannel */
+/** @typedef {import("../state/state.js").FileRef} FileRef */
 
-/**
- * @param {QcChannel[] | null | undefined} channels
- * @returns {ChannelTrace[]}
- */
-function channelsToEnv(channels) {
-  return (Array.isArray(channels) ? channels : [])
-    .sort((a, b) => (a.channel_index ?? 0) - (b.channel_index ?? 0))
-    .map((c) => c.series);
-}
-
-/**
- * @param {State} state
- * @param {number} nwin
- */
-export function syncRois(state, nwin) {
-  if (!state.rois) state.rois = [];
-  if (state.rois.length > nwin) state.rois = state.rois.slice(0, nwin);
-  while (state.rois.length < nwin) {
-    state.rois.push({ start: 0, end: state.seriesLength || 0 });
-  }
-}
+/** Bins of the whole-recording envelopes (grid overview, aux): about a wide canvas in pixels. */
+export const OVERVIEW_BINS = 2048;
+/** Bins of each channel's mini trace in the QC grid, a few dozen pixels wide. */
+export const QC_TRACE_BINS = 128;
 
 /**
  * Run the automatic QC pipeline server-side and load the result into the
- * interactive controls: detected bad channels replace the discard masks (click
- * a cell to correct one) and detected artifacts replace the artifact windows
- * (+/- to correct those). Nothing is sent to the decomposition here — the
- * corrected masks travel with the run request.
+ * interactive controls: detected bad channels replace the discarded channels
+ * (click a cell to correct one) and detected artifacts replace the artifact
+ * windows (+/- to correct those). Nothing is sent to the decomposition here —
+ * the corrected channels travel with the run request.
+ *
+ * @param {App} app
  */
-/** @param {App} app */
 export async function requestAutoQc(app) {
-  const {
-    state,
-    els,
-    api,
-    setStatus,
-    updateProgress,
-    renderChannelQC,
-    refreshVisuals,
-  } = app;
+  const { state, els, api, setStatus, renderChannelQC, refreshVisuals } = app;
 
   if (!state.uploadToken) {
     setStatus("Load a signal first", "error");
     return false;
   }
 
-  if (els?.qcAutoBtn) els.qcAutoBtn.disabled = true;
-  updateProgress(undefined, "Running automatic QC...");
+  if (els.qcAutoBtn) els.qcAutoBtn.disabled = true;
   setStatus("Running automatic QC...", "muted");
 
   try {
-    const data = await api.runAutoQc({ upload_token: state.uploadToken });
-    if (Array.isArray(data?.bad_channels_per_grid)) {
-      setDiscardMasks(state, data.bad_channels_per_grid);
-    }
-    setArtifactRegions(state, toSpans(data?.artifact_regions));
-    setArtifactMode(state, false);
-    setChannelTraces(state, []);
-
-    const nBad = (state.discardMasks || []).reduce(
-      (sum, grid) =>
-        sum + (grid || []).reduce((acc, v) => acc + (v ? 1 : 0), 0),
-      0,
+    const { badChannelsPerGrid, artifactRegions } = toAutoQc(
+      await withUpload(app, (token) => api.runAutoQc({ upload_token: token })),
     );
+    setDiscardChannels(state, badChannelsPerGrid);
+    setArtifactRegions(state, artifactRegions);
+    setArtifactMode(state, false);
+
+    const nBad = state.discardChannels.flat().filter(Boolean).length;
     const nArtifact = state.artifactRegions.length;
 
-    await renderChannelQC(false);
+    // The channels' traces stand; only which ones are discarded changed.
+    renderChannelQC();
     refreshVisuals();
-    updateProgress(
-      undefined,
+    setStatus(
       `Automatic QC: ${nBad} bad channel(s), ${nArtifact} artifact window(s)`,
+      "success",
     );
-    setStatus("Automatic QC complete", "success");
     return true;
   } catch (err) {
-    console.error(err);
-    setStatus(`Automatic QC failed: ${errorMessage(err)}`, "error");
+    handleError(err, setStatus, "Automatic QC failed");
     return false;
   } finally {
-    if (els?.qcAutoBtn) els.qcAutoBtn.disabled = false;
+    if (els.qcAutoBtn) els.qcAutoBtn.disabled = false;
   }
 }
 
 /**
+ * Keeps each grid's channel traces on the window the grid should show: its
+ * channels over the first analysis window. Asking again is cheap; a grid whose
+ * traces already cover that window sends nothing, and traces that arrive
+ * after the window moved on are dropped.
+ *
  * @param {App} app
- * @param {number} gridIdx
- * @param {number} [start]
- * @param {number | null} [end]
+ * @returns {() => void} Ask for the current grid's traces.
  */
-export async function requestQcGridWindow(app, gridIdx, start, end) {
-  const { state, api, renderChannelQC, setStatus } = app;
-  const s = Number.isFinite(start) ? start : 0;
-  const e = Number.isFinite(end) ? end : state.seriesLength;
+export function createQcTraces(app) {
+  /** @type {Map<number, string>} The window each grid last asked for. */
+  const wanted = new Map();
+  /** @type {Map<number, string>} The window each grid's traces cover. */
+  const shown = new Map();
+  const fetcher = createViewFetcher(
+    async (
+      /** @type {{ key: string, grid: number, start: number, end: number }} */ p,
+    ) => ({
+      p,
+      view: await withUpload(app, (token) =>
+        app.api.fetchSeries("emg", {
+          upload_token: token,
+          grid: p.grid,
+          start: p.start,
+          end: p.end,
+          bins: QC_TRACE_BINS,
+        }),
+      ),
+    }),
+    ({ p, view }) => {
+      if (wanted.get(p.grid) !== p.key) return;
+      setChannelTraceForGrid(app.state, p.grid, view.rows);
+      shown.set(p.grid, p.key);
+      const { currentGrid, currentStage } = app.state;
+      if (p.grid === currentGrid && currentStage === "qc")
+        app.renderChannelQC();
+    },
+    (err) => handleError(err, app.setStatus, "QC window update failed"),
+  );
 
-  if (!state.uploadToken || !Number.isFinite(gridIdx) || gridIdx < 0) return;
-  if (state.qcWindowLoading?.[gridIdx]) return;
-  setQcWindowLoadingForGrid(state, gridIdx, true);
-
-  try {
-    const requestPayload = {
-      upload_token: state.uploadToken,
-      grid_index: gridIdx,
-      start: s,
-      end: e,
-      target_fs: 1000,
-    };
-
-    const preferBinary = typeof api?.fetchQcWindow === "function";
-    const data = await api.fetchQcWindow(requestPayload, { preferBinary });
-    const env = channelsToEnv(data.channels);
-    setChannelTraceForGrid(state, gridIdx, env);
-    if (gridIdx === state.currentGrid) {
-      renderChannelQC();
-    }
-  } catch (err) {
-    console.error(err);
-    if (typeof setStatus === "function") {
-      setStatus(`QC window update failed: ${errorMessage(err)}`, "error");
-    }
-  } finally {
-    setQcWindowLoadingForGrid(state, gridIdx, false);
-  }
+  return function ensureQcTraces() {
+    const { state } = app;
+    const token = state.uploadToken;
+    if (!token) return;
+    const grid = state.currentGrid;
+    const roi = state.rois[0];
+    const start = roi?.start ?? 0;
+    const end = roi?.end ?? state.totalSamples ?? 0;
+    const key = `${token}:${grid}:${start}:${end}`;
+    wanted.set(grid, key);
+    if (shown.get(grid) === key && state.channelTraces[grid]?.length) return;
+    fetcher.want(key, { key, grid, start, end });
+  };
 }
 
 /**
+ * Open a raw file. Its preview replaces the file shown only once it has all
+ * arrived: a file that fails to open leaves the current one, its edit session
+ * included, as it was.
+ *
  * @param {App} app
- * @param {{ silentFailure?: boolean, filepath?: string | null }} [options]
+ * @param {{ file: FileRef & { path: string }, silentFailure?: boolean }} options
  */
-export async function requestPreview(app, options = {}) {
-  const { silentFailure = false, filepath = null } = options;
+export async function requestPreview(app, { file, silentFailure = false }) {
   const {
     state,
     els,
     api,
     setUploadLoading,
-    updateProgress,
     populateAuxSelector,
     populateGridTabs,
-    requestQcGridWindow,
-    enableRoiSelection,
-    renderBidsAutoInfo,
+    prefillHardwareFields,
     renderBidsMuscleFields,
     setStatus,
     showWorkspace,
-    switchStage,
-    refreshVisuals,
-    renderChannelQC,
     applyPreviewMetadata,
   } = app;
 
-  if (!filepath) return false;
   setUploadLoading(true);
-  updateProgress(0, "Fetching preview...");
 
   try {
-    const data = await api.fetchPreviewByPath(filepath);
+    const data = normalizePreviewPayload(
+      await api.fetchPreviewByPath(file.path),
+    );
+    // The whole-recording traces come as envelopes, sized for the canvases.
+    const whole = { upload_token: data.upload_token, bins: OVERVIEW_BINS };
+    const [overview, aux] = await Promise.all([
+      api.fetchSeries("overview", whole),
+      api.fetchSeries("aux", whole),
+    ]);
+    beginRawPreviewTransition(state, file);
+    app.resetSessionForm(file.name ?? "");
     setUploadToken(state, data.upload_token || null);
-    setGridSeries(state, data.grid_mean_abs || []);
-    setGridNames(state, data.grid_names || []);
-    setSeriesLength(state, data.total_samples);
-    setChannelMeans(state, data.channel_means || []);
-    setCoordinates(state, data.coordinates || []);
-    setChannelTraces(state, []);
-    setQcWindowLoading(state, {});
-    setMetadata(state, data.metadata || {});
-    setMuscle(state, data.muscle || []);
-    setAuxData(state, data.auxiliary || [], data.auxiliary_names || []);
+    setGridSeries(state, overview.rows);
+    setGridNames(state, data.grid_names);
+    setTotalSamples(state, data.total_samples);
+    setChannelMeans(state, data.channel_means);
+    setCoordinates(state, data.coordinates);
+    setMetadata(state, data.metadata);
+    setMuscleNames(state, data.muscle_names);
+    setAuxData(state, aux.rows, data.aux_names);
+    // A BIDS recording brings the target phases its events.tsv lists.
+    setSegments(state, toSegments(data.segments));
+    setTargetIndex(state, data.target_index);
     setFsamp(state, data.fsamp);
     applyPreviewMetadata(data);
-    setPreviewSeries(state, data.mean_abs || []);
     populateAuxSelector();
-    ensureDiscardMasks(state);
+    setDiscardChannels(state, data.discard_channels);
     populateGridTabs();
-    const nwin = Number(els.nwindows?.value) || 1;
-    const defaultEnd = state.seriesLength || 0;
-    const rois = [];
-    for (let i = 0; i < nwin; i++) {
-      rois.push({ start: 0, end: defaultEnd });
-    }
-    setRois(state, rois);
+    // Every window starts as the whole recording, waiting for a drag.
+    setRois(state, []);
+    syncRois(state, Number(els.nwindows?.value) || 1);
     setArtifactRegions(state, []);
     setArtifactMode(state, false);
-    const roiPreview = state.rois?.[0];
-    await requestQcGridWindow(
-      getCurrentGrid(state),
-      roiStart(roiPreview),
-      roiEnd(roiPreview, state.seriesLength),
-    );
-    enableRoiSelection("emgCanvas");
-    enableRoiSelection("auxCanvas");
-    // Raw preview resets edit slice first; ensure BIDS rows render in QC context
-    // so they source run grid names instead of edit fallback ("Grid 1").
-    switchStage("qc");
-    renderBidsAutoInfo();
+    // Before the muscle rows: outside Edit they name the recording's grids.
+    showWorkspace("qc");
+    prefillHardwareFields();
     renderBidsMuscleFields();
 
-    updateProgress(0, "Preview ready - drag to select ROI");
     setStatus("Preview ready", "success");
-    showWorkspace({ keepLandingVisible: true });
-    await nextFrame();
-    refreshVisuals();
-    await renderChannelQC(true);
-    els.landing?.classList.add("hidden");
     return true;
   } catch (err) {
-    console.error(err);
-    setUploadToken(state, null);
-    updateProgress(0, "Preview failed");
-    if (!silentFailure) {
-      setStatus("Preview failed", "error");
-    }
+    if (silentFailure) console.error(err);
+    else handleError(err, setStatus, "Preview failed");
     return false;
   } finally {
     setUploadLoading(false);

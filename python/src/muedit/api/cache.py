@@ -1,323 +1,219 @@
-"""Cache and signal-window utilities for the FastAPI layer."""
+"""The API caches, all counted against one ``MemoryBudget`` and scoped to sessions."""
 
 from __future__ import annotations
 
-import logging
-import threading
-import time
-import uuid
-from dataclasses import dataclass
-from typing import TypeVar
+import contextlib
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
-import numpy as np
-
-from muedit.models import EditSignalContext, FloatArray, IntArray, SignalImport
-
-logger = logging.getLogger(__name__)
-
-UPLOAD_CACHE_TTL_SEC = 20 * 60
-UPLOAD_CACHE_MAX_ITEMS = 3
-EDIT_SIGNAL_CONTEXT_TTL_SEC = 12 * 60 * 60
-EDIT_SIGNAL_CONTEXT_MAX_ITEMS = 1
-
-DECOMP_PREVIEW_BINARY_TTL_SEC = 10 * 60
-DECOMP_PREVIEW_BINARY_MAX_ITEMS = 8
-
-UPLOAD_CACHE_MAX_BYTES = 1024 * 1024 * 1024
-DECOMP_PREVIEW_BINARY_MAX_BYTES = 512 * 1024 * 1024
-
-_CACHE_LOCK = threading.Lock()
+from muedit.api.memory import (
+    DEFAULT_SESSION,
+    BudgetedLRU,
+    MemoryBudget,
+    default_budget_bytes,
+)
+from muedit.editing.session import EditSession
+from muedit.models import (
+    FloatArray,
+    IntArray,
+    SignalImport,
+    resident_nbytes,
+)
+from muedit.signal.pyramid import MinMaxPyramid
+from muedit.storage import SessionStore
 
 
 @dataclass
-class QCSignal:
-    """Filtered preview EMG kept with an upload for channel views and auto-QC."""
+class SignalViews:
+    """An upload's QC drawing data: float32 min/max pyramids and grid overview, memory-mapped."""
 
-    data: FloatArray  # float32, (n_channels, n_samples)
     fsamp: float
     grid_names: list[str]
-    channel_offsets: list[int]  # first row of each grid in ``data``
-    discard_channels: list[IntArray]  # per grid, 1 = discarded channel
+    grid_rows: list[tuple[int, int]]  # [first, stop) EMG rows of each grid
+    emg_types: list[int]  # per grid, the bandpass the EMG is filtered with
+    emg: MinMaxPyramid  # bandpassed EMG of the grid rows
+    overview: FloatArray  # (ngrid, n_samples): smoothed mean |bandpassed EMG| per grid
+    overview_levels: MinMaxPyramid
+    aux: MinMaxPyramid
 
     @property
     def nbytes(self) -> int:
-        return int(self.data.nbytes) + sum(int(m.nbytes) for m in self.discard_channels)
+        return (
+            self.emg.nbytes
+            + resident_nbytes(self.overview)
+            + self.overview_levels.nbytes
+            + self.aux.nbytes
+        )
 
 
 @dataclass
-class _Entry:
-    """Base cache entry: every entry expires and reports its resident size."""
-
-    expires_at: float
-
-    @property
-    def nbytes(self) -> int:
-        return 0
-
-
-@dataclass
-class _UploadEntry(_Entry):
+class _UploadEntry:
     signal: SignalImport
-    source_path: str | None
-    qc: QCSignal | None = None
+    source_path: str
+    views: SignalViews
+    store: SessionStore  # T1 folder holding the memory-mapped arrays
 
     @property
     def nbytes(self) -> int:
-        return self.signal.nbytes + (self.qc.nbytes if self.qc is not None else 0)
+        return self.signal.nbytes + self.views.nbytes
 
 
 @dataclass
-class _PreviewBinaryEntry(_Entry):
-    payload: bytes
+class RunExtras:
+    """What a run's save writes besides the trains: per-MU SIL, windows and target segments."""
 
-    @property
-    def nbytes(self) -> int:
-        return len(self.payload)
+    sil: list[float] = field(default_factory=list)
+    rois: list[tuple[int, int]] | None = None
+    target_segments: dict[str, Any] | None = None
 
 
 @dataclass
-class _EditContextEntry(_Entry):
-    context: EditSignalContext
+class RunResult:
+    """A finished run's pulse trains and discharge times, for its explorer and its save."""
+
+    pulse_trains: FloatArray  # float32, (n_mu, n_samples)
+    store: SessionStore | None = None
+    spike_times: list[IntArray] = field(default_factory=list)  # sorted int32 per MU
+    extras: RunExtras = field(default_factory=RunExtras)
 
     @property
     def nbytes(self) -> int:
-        return self.context.nbytes
+        return resident_nbytes(self.pulse_trains) + sum(int(s.nbytes) for s in self.spike_times)
 
 
-_E = TypeVar("_E", bound=_Entry)
+@dataclass
+class _EditSessionEntry:
+    session: EditSession
 
-_UPLOAD_SESSION_CACHE: dict[str, _UploadEntry] = {}
-_DECOMP_PREVIEW_BINARY_CACHE: dict[str, _PreviewBinaryEntry] = {}
-_EDIT_SIGNAL_CONTEXT_CACHE: dict[str, _EditContextEntry] = {}
-_EDIT_SIGNAL_LABEL_INDEX: dict[str, str] = {}
-
-
-def _purge_expired_caches_locked() -> None:
-    """Purge expired entries from all API caches (caller must hold lock)."""
-    now = time.time()
-    for token, entry in list(_UPLOAD_SESSION_CACHE.items()):
-        if entry.expires_at <= now:
-            _UPLOAD_SESSION_CACHE.pop(token, None)
-    for token, preview in list(_DECOMP_PREVIEW_BINARY_CACHE.items()):
-        if preview.expires_at <= now:
-            _DECOMP_PREVIEW_BINARY_CACHE.pop(token, None)
-    expired_edit = {
-        token for token, entry in _EDIT_SIGNAL_CONTEXT_CACHE.items() if entry.expires_at <= now
-    }
-    for token in expired_edit:
-        _EDIT_SIGNAL_CONTEXT_CACHE.pop(token, None)
-    if expired_edit:
-        for label, mapped in list(_EDIT_SIGNAL_LABEL_INDEX.items()):
-            if mapped in expired_edit:
-                _EDIT_SIGNAL_LABEL_INDEX.pop(label, None)
+    @property
+    def nbytes(self) -> int:
+        return self.session.nbytes
 
 
-def _evict_to_budget_locked(
-    cache: dict[str, _E],
-    max_items: int,
-    max_bytes: int | None = None,
-    protect: str | None = None,
-) -> None:
-    """Trim cache to its item and byte budget, evicting oldest-expiring first."""
-    total = sum(entry.nbytes for entry in cache.values())
-    while len(cache) > max_items or (max_bytes is not None and total > max_bytes):
-        candidates = [key for key in cache if key != protect]
-        if not candidates:
-            return  # only the protected entry is left; keep it whatever its size
-        oldest_key = min(candidates, key=lambda key: cache[key].expires_at)
-        evicted = cache.pop(oldest_key)
-        total -= evicted.nbytes
-        logger.debug(
-            "Evicted cache entry %s (%.1f MB); %d entries / %.1f MB retained",
-            oldest_key,
-            evicted.nbytes / 1e6,
-            len(cache),
-            total / 1e6,
-        )
+def _close_store(entry: _UploadEntry | RunResult) -> None:
+    """Delete the T1 folder of an entry leaving its cache."""
+    if entry.store is not None:
+        entry.store.close()
 
 
-def _store_upload_signal(signal: SignalImport, source_path: str | None = None) -> str:
-    """Store a copy of ``signal`` (and the file it came from) and return a token."""
-    token = uuid.uuid4().hex
-    entry = _UploadEntry(
-        expires_at=time.time() + UPLOAD_CACHE_TTL_SEC,
-        signal=signal.clone(),
-        source_path=source_path,
-    )
-    with _CACHE_LOCK:
-        _purge_expired_caches_locked()
-        _UPLOAD_SESSION_CACHE[token] = entry
-        _evict_to_budget_locked(
-            _UPLOAD_SESSION_CACHE,
-            UPLOAD_CACHE_MAX_ITEMS,
-            UPLOAD_CACHE_MAX_BYTES,
-            protect=token,
-        )
-    return token
+def _close_edit_session(entry: _EditSessionEntry) -> None:
+    entry.session.close()
 
 
-def _get_upload_source_path(token: str | None) -> str | None:
-    """Return the on-disk path the upload for ``token`` was loaded from, if known."""
-    if not token:
-        return None
-    with _CACHE_LOCK:
-        entry = _UPLOAD_SESSION_CACHE.get(token)
-        return entry.source_path if entry else None
+BUDGET = MemoryBudget(default_budget_bytes())
+_UPLOADS: BudgetedLRU[_UploadEntry] = BudgetedLRU(
+    "uploads", BUDGET, per_session=1, on_drop=_close_store
+)
+_RUN_RESULTS: BudgetedLRU[RunResult] = BudgetedLRU(
+    "run_results", BUDGET, per_session=1, on_drop=_close_store
+)
+_EDIT_SESSIONS: BudgetedLRU[_EditSessionEntry] = BudgetedLRU(
+    "edit_sessions", BUDGET, per_session=1, on_drop=_close_edit_session
+)
 
 
-def _get_upload_signal(token: str | None) -> SignalImport | None:
-    """Resolve upload token to a copy of the stored signal, refreshing TTL on hit."""
-    if not token:
-        return None
-    with _CACHE_LOCK:
-        _purge_expired_caches_locked()
-        entry = _UPLOAD_SESSION_CACHE.get(token)
-        if not entry:
+def close_session(session: str) -> None:
+    """Drop everything ``session`` holds: its tab was closed."""
+    BUDGET.close_session(session)
+
+
+def release_upload(session: str = DEFAULT_SESSION) -> None:
+    """Drop the upload ``session`` holds, before it loads the next file."""
+    _UPLOADS.release_session(session)
+
+
+def store_upload(
+    signal: SignalImport,
+    source_path: str,
+    store: SessionStore,
+    views: SignalViews,
+    session: str = DEFAULT_SESSION,
+) -> str:
+    """Keep ``signal`` and QC ``views``, owning (and later deleting) their store; return a token."""
+    entry = _UploadEntry(signal=signal, source_path=source_path, views=views, store=store)
+    return _UPLOADS.pin(entry, session)
+
+
+@dataclass
+class HeldUpload:
+    """An upload taken for one request or run: its store stays until ``release``."""
+
+    signal: SignalImport  # a read-only view
+    source_path: str
+    store: SessionStore
+    views: SignalViews
+    token: str
+
+    def release(self) -> None:
+        """End the hold; a drop of the upload meanwhile deletes its store now."""
+        _UPLOADS.unhold(self.token)
+        self.store.release()
+
+
+def hold_upload(token: str | None) -> HeldUpload | None:
+    """The upload for ``token``, unevictable, its store open until ``release`` even if dropped."""
+    with BUDGET.locked():
+        entry = _UPLOADS.hold(token)
+        if entry is None or token is None:
             return None
-        entry.expires_at = time.time() + UPLOAD_CACHE_TTL_SEC
-        stored = entry.signal
-    return stored.clone()
+        entry.store.hold()
+        signal = entry.signal.readonly_view()
+        return HeldUpload(signal, entry.source_path, entry.store, entry.views, token)
 
 
-def _store_qc_signal(
-    token: str,
-    data: FloatArray,
-    fsamp: float,
-    grid_names: list[str],
-    discard_channels: list[IntArray],
-) -> None:
-    """Attach preprocessed QC arrays to the upload session for ``token``."""
-    channel_offsets: list[int] = []
-    offset = 0
-    for mask in discard_channels:
-        channel_offsets.append(offset)
-        offset += int(np.asarray(mask).size)
-
-    qc = QCSignal(
-        data=np.array(data, dtype=np.float32),
-        fsamp=float(fsamp),
-        grid_names=list(grid_names),
-        channel_offsets=channel_offsets,
-        discard_channels=[np.array(m, dtype=int) for m in discard_channels],
-    )
-    with _CACHE_LOCK:
-        _purge_expired_caches_locked()
-        entry = _UPLOAD_SESSION_CACHE.get(token)
-        if entry is None:
-            logger.debug("Dropping QC data: upload token %s is no longer cached", token)
-            return
-        entry.qc = qc
-        entry.expires_at = time.time() + UPLOAD_CACHE_TTL_SEC
-        _evict_to_budget_locked(
-            _UPLOAD_SESSION_CACHE,
-            UPLOAD_CACHE_MAX_ITEMS,
-            UPLOAD_CACHE_MAX_BYTES,
-            protect=token,
-        )
+def store_run_result(
+    pulse_trains: FloatArray,
+    session: str = DEFAULT_SESSION,
+    store: SessionStore | None = None,
+    spike_times: list[IntArray] | None = None,
+    extras: RunExtras | None = None,
+) -> str:
+    """Keep a run's pulse trains and discharge times for its save; dropping deletes ``store``."""
+    result = RunResult(pulse_trains, store, list(spike_times or []), extras or RunExtras())
+    return _RUN_RESULTS.pin(result, session)
 
 
-def _get_qc_signal(token: str | None) -> QCSignal | None:
-    """Resolve QC arrays by upload token and refresh session TTL on hit.
-
-    ``data`` is a read-only view of the cached array; everything else is a copy.
-    """
-    if not token:
-        return None
-    with _CACHE_LOCK:
-        _purge_expired_caches_locked()
-        entry = _UPLOAD_SESSION_CACHE.get(token)
-        qc = entry.qc if entry is not None else None
-        if entry is None or qc is None:
-            return None
-        entry.expires_at = time.time() + UPLOAD_CACHE_TTL_SEC
-    data_view = qc.data.view()
-    data_view.flags.writeable = False
-    return QCSignal(
-        data=data_view,
-        fsamp=qc.fsamp,
-        grid_names=list(qc.grid_names),
-        channel_offsets=list(qc.channel_offsets),
-        discard_channels=[m.copy() for m in qc.discard_channels],
-    )
+@contextlib.contextmanager
+def held_run_result(token: str | None) -> Iterator[RunResult | None]:
+    """The stored run for ``token``, pulse trains read-only, its store kept until the block ends."""
+    with BUDGET.locked():
+        stored = _RUN_RESULTS.hold(token)
+        if stored is not None and stored.store is not None:
+            stored.store.hold()
+    if stored is None or token is None:
+        yield None
+        return
+    pulse_trains = stored.pulse_trains.view()
+    pulse_trains.flags.writeable = False
+    try:
+        yield RunResult(pulse_trains, None, stored.spike_times, stored.extras)
+    finally:
+        _RUN_RESULTS.unhold(token)
+        if stored.store is not None:
+            stored.store.release()
 
 
-def _store_decomp_preview_binary(payload: bytes) -> str:
-    """Store binary decompose-preview payload and return short-lived token."""
-    token = uuid.uuid4().hex
-    with _CACHE_LOCK:
-        _purge_expired_caches_locked()
-        _DECOMP_PREVIEW_BINARY_CACHE[token] = _PreviewBinaryEntry(
-            expires_at=time.time() + DECOMP_PREVIEW_BINARY_TTL_SEC,
-            payload=payload,
-        )
-        _evict_to_budget_locked(
-            _DECOMP_PREVIEW_BINARY_CACHE,
-            DECOMP_PREVIEW_BINARY_MAX_ITEMS,
-            DECOMP_PREVIEW_BINARY_MAX_BYTES,
-            protect=token,
-        )
-    return token
+def store_edit_session(edit: EditSession, session: str = DEFAULT_SESSION) -> str:
+    """Keep an edit session for ``session``, closing the one it replaces; return its token."""
+    return _EDIT_SESSIONS.pin(_EditSessionEntry(edit), session)
 
 
-def _get_decomp_preview_binary(token: str | None) -> bytes | None:
-    """Resolve decompose-preview binary payload by token, refreshing TTL on hit."""
-    if not token:
-        return None
-    with _CACHE_LOCK:
-        _purge_expired_caches_locked()
-        entry = _DECOMP_PREVIEW_BINARY_CACHE.get(token)
-        if not entry:
-            return None
-        entry.expires_at = time.time() + DECOMP_PREVIEW_BINARY_TTL_SEC
-        return entry.payload
+def get_edit_session(token: str | None, session: str | None = None) -> EditSession | None:
+    """The edit session for ``token``; with ``session``, it moves to that tab (a reloaded page)."""
+    entry = _EDIT_SESSIONS.get(token) if session is None else _EDIT_SESSIONS.move(token, session)
+    return entry.session if entry is not None else None
 
 
-def _store_edit_signal_context(context: EditSignalContext, file_label: str | None = None) -> str:
-    """Store a compact copy of a decomposition's raw-signal context and return a token."""
-    token = uuid.uuid4().hex
-    entry = _EditContextEntry(
-        expires_at=time.time() + EDIT_SIGNAL_CONTEXT_TTL_SEC,
-        context=context.compact_copy(),
-    )
-    with _CACHE_LOCK:
-        _purge_expired_caches_locked()
-        _EDIT_SIGNAL_CONTEXT_CACHE[token] = entry
-        label = str(file_label or "").strip()
-        if label:
-            _EDIT_SIGNAL_LABEL_INDEX[label] = token
-        _evict_to_budget_locked(
-            _EDIT_SIGNAL_CONTEXT_CACHE,
-            EDIT_SIGNAL_CONTEXT_MAX_ITEMS,
-            protect=token,
-        )
-    return token
+def resize_edit_session(token: str) -> None:
+    """Recount an edit session's bytes after an edit."""
+    _EDIT_SESSIONS.resize(token)
 
 
-def _get_edit_signal_context(token: str | None) -> EditSignalContext | None:
-    """Resolve edit signal context token to a copy, refreshing TTL on hit."""
-    if not token:
-        return None
-    with _CACHE_LOCK:
-        _purge_expired_caches_locked()
-        entry = _EDIT_SIGNAL_CONTEXT_CACHE.get(token)
-        if not entry:
-            return None
-        entry.expires_at = time.time() + EDIT_SIGNAL_CONTEXT_TTL_SEC
-        stored = entry.context
-    return stored.compact_copy()
-
-
-def _get_edit_signal_context_by_label(file_label: str | None) -> EditSignalContext | None:
-    """Resolve edit signal context by loaded decomposition file label."""
-    label = str(file_label or "").strip()
-    if not label:
-        return None
-    with _CACHE_LOCK:
-        _purge_expired_caches_locked()
-        token = _EDIT_SIGNAL_LABEL_INDEX.get(label)
-    result = _get_edit_signal_context(token)
-    if result is None and token is not None:
-        with _CACHE_LOCK:
-            if _EDIT_SIGNAL_LABEL_INDEX.get(label) == token:
-                _EDIT_SIGNAL_LABEL_INDEX.pop(label, None)
-    return result
+def live_edit_logs() -> set[Path]:
+    """The edit logs open sessions are writing."""
+    with BUDGET.locked():
+        entries = [slot.value.session for slot in _EDIT_SESSIONS.slots.values()]
+    logs = [edit.log for edit in entries]  # read once: a close sets it to None
+    return {log.path for log in logs if log is not None}

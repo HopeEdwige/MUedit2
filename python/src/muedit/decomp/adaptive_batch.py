@@ -2,287 +2,141 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import replace
-from typing import Any
+from collections.abc import Mapping
 
 import numpy as np
 
-from muedit.adapt_decomp.config import Config
+from muedit.decomp.adaptation import AdaptiveDecomp, BatchSink, Calibration
+from muedit.decomp.types import DecompositionParameters
 from muedit.models import BoolArray, FloatArray, IntArray
-from muedit.signal.decomp_primitives import (
-    POSTPROC_MIN_ISI_SEC,
-    enforce_refractory,
-    extend_signal,
-    find_refractory_peaks,
-    signed_square,
-    split_by_amplitude,
-)
-
-_DEFAULT_CONFIG = Config()
+from muedit.signal.decomp_primitives import enforce_refractory, extend_mask, signed_square
+from muedit.signal.streaming import SampleSource, StreamedExtender
+from muedit.storage import ArrayStore, RamStore
 
 
-def _compute_calibration_stats(
-    w_sig: FloatArray,
-    mu_filters: FloatArray,
-    fsamp: float,
-) -> tuple[FloatArray, FloatArray]:
-    """Project the whitened calibration signal through MU filters and derive spike centroids."""
-    n_mu = mu_filters.shape[1]
-    ipts_calib = w_sig.T @ mu_filters
-    ipts_sq = signed_square(ipts_calib)
-
-    base_centr = np.zeros(n_mu, dtype=np.float32)
-    spikes_centr = np.ones(n_mu, dtype=np.float32)
-
-    for j in range(n_mu):
-        pt = ipts_sq[:, j]
-        peaks = find_refractory_peaks(pt, fsamp, min_isi_sec=POSTPROC_MIN_ISI_SEC)
-        if len(peaks) > 1:
-            _, centroids, _ = split_by_amplitude(pt, peaks)
-            hi = int(np.argmax(centroids))
-            spikes_centr[j] = float(centroids[hi])
-            base_centr[j] = float(centroids[1 - hi])
-        elif len(peaks) == 1:
-            spikes_centr[j] = float(pt[peaks[0]])
-
-    return base_centr, spikes_centr
-
-
-def _run_one_pass(
-    emg_seg: FloatArray,
-    emg_calib: FloatArray,
+def _run_bidirectional(
+    source: StreamedExtender,
     whiten_mat: FloatArray,
     mu_filters: FloatArray,
-    base_centr: FloatArray,
-    spikes_centr: FloatArray,
-    ex_factor: int,
-    config: Config,
-    artifact_mask: BoolArray | None = None,
-) -> tuple[FloatArray, IntArray, dict[str, Any]]:
-    """Run adaptive decomposition on a single EMG segment and return ipts, spikes, and losses."""
-    from muedit.adapt_decomp.adaptation import run_adaptive_decomposition
-
-    cfg = replace(config, ex_factor=ex_factor)
-    ipts, spikes, losses = run_adaptive_decomposition(
-        emg=emg_seg.astype(np.float32),
-        whitening=whiten_mat.astype(np.float32),
-        sep_vectors=mu_filters.T.astype(np.float32),
-        base_centr=base_centr.copy(),
-        spikes_centr=spikes_centr.copy(),
-        emg_calib=emg_calib.astype(np.float32),
-        config=cfg,
-        artifact_mask=artifact_mask,
-    )
-    return ipts.astype(np.float64), spikes, losses
-
-
-def _run_adapt_decomp_bidirectional(
-    grid_data_g: FloatArray,
-    win_data_g: FloatArray,
-    whiten_mat: FloatArray,
-    mu_filters: FloatArray,
-    w_sig: FloatArray,
     calib_start: int,
-    config: Config,
-    artifact_mask: BoolArray | None = None,
-) -> tuple[FloatArray, IntArray, dict[str, Any]]:
+    calib_end: int,
+    params: DecompositionParameters,
+    fsamp: float,
+    sink: BatchSink,
+) -> None:
     """Run adaptive decomposition forward from calib_start and, if needed, backward over the pre-calibration segment."""
-    base_centr, spikes_centr = _compute_calibration_stats(w_sig, mu_filters, config.fsamp)
 
-    ex_factor = w_sig.shape[0] // win_data_g.shape[0]
-    bs = config.batch_size
+    def _clipped(lo: int, hi: int) -> BatchSink:
+        def _emit(start: int, pulse_trains_batch: np.ndarray, spikes: np.ndarray) -> None:
+            a, b = max(start, lo), min(start + len(pulse_trains_batch), hi)
+            if a < b:
+                sink(a, pulse_trains_batch[a - start : b - start], spikes[a - start : b - start])
 
-    emg_calib_raw = win_data_g.T.astype(np.float32)
-    n_calib = win_data_g.shape[1]
-    emg_calib_ext = (
-        extend_signal(win_data_g, ex_factor).T[ex_factor - 1 : n_calib].astype(np.float32)
-    )
+        return _emit
 
-    fwd_start = max(0, calib_start - bs)
-    emg_fwd = np.ascontiguousarray(grid_data_g[:, fwd_start:].T.astype(np.float32))
-    fwd_mask = artifact_mask[fwd_start:] if artifact_mask is not None else None
-    ipts_fwd_full, spikes_fwd_full, losses_fwd = _run_one_pass(
-        emg_seg=emg_fwd,
-        emg_calib=emg_calib_raw,
-        whiten_mat=whiten_mat,
-        mu_filters=mu_filters,
-        base_centr=base_centr,
-        spikes_centr=spikes_centr,
-        ex_factor=ex_factor,
-        config=config,
-        artifact_mask=fwd_mask,
-    )
+    def _pass(calibration: tuple[int, int] | Calibration) -> AdaptiveDecomp:
+        return AdaptiveDecomp(
+            source=source,
+            whiten_mat=whiten_mat,
+            mu_filters=mu_filters,
+            calibration=calibration,
+            params=params,
+            fsamp=fsamp,
+        )
 
-    pre_offset = calib_start - fwd_start
-    ipts_fwd = ipts_fwd_full[pre_offset:]
-    spikes_fwd = spikes_fwd_full[pre_offset:]
-    n_pre_fwd = -(-pre_offset // bs)
-    if config.compute_loss and losses_fwd:
-        losses_fwd = {k: v[n_pre_fwd:] for k, v in losses_fwd.items()}
-
-    if calib_start == 0:
-        return ipts_fwd, spikes_fwd, losses_fwd
-
-    e_pre = extend_signal(grid_data_g[:, :calib_start], ex_factor).T[:calib_start]
-    remainder = calib_start % bs
-    if remainder != 0:
-        pad_len = bs - remainder
-        e_pre = np.pad(e_pre, ((pad_len, 0), (0, 0)), mode="reflect")
-    else:
-        pad_len = 0
-
-    split_pts = list(range(bs, e_pre.shape[0], bs))
-    blocks = np.split(e_pre, split_pts, axis=0)
-    emg_bwd = np.ascontiguousarray(np.concatenate(blocks[::-1], axis=0).astype(np.float32))
-
-    bwd_mask = None
-    if artifact_mask is not None:
-        pre_mask = artifact_mask[:calib_start]
-        if pad_len > 0:
-            pre_mask = np.pad(pre_mask, (pad_len, 0), mode="constant", constant_values=False)
-        mask_blocks = np.split(pre_mask, split_pts)
-        bwd_mask = np.concatenate(mask_blocks[::-1])
-
-    ipts_bwd_rev, spikes_bwd_rev, losses_bwd_rev = _run_one_pass(
-        emg_seg=emg_bwd,
-        emg_calib=emg_calib_ext,
-        whiten_mat=whiten_mat,
-        mu_filters=mu_filters,
-        base_centr=base_centr,
-        spikes_centr=spikes_centr,
-        ex_factor=1,
-        config=config,
-        artifact_mask=bwd_mask,
-    )
-
-    # Re-split at the reversed block boundaries and restore original order.
-    rev_split_pts = list(np.cumsum([b.shape[0] for b in reversed(blocks)]))[:-1]
-    out_ipts = np.split(ipts_bwd_rev, rev_split_pts, axis=0)
-    out_spikes = np.split(spikes_bwd_rev, rev_split_pts, axis=0)
-    ipts_bwd = np.concatenate(out_ipts[::-1], axis=0)
-    spikes_bwd = np.concatenate(out_spikes[::-1], axis=0)
-
-    if pad_len > 0:
-        ipts_bwd = ipts_bwd[pad_len:]
-        spikes_bwd = spikes_bwd[pad_len:]
-
-    losses: dict[str, Any] = {}
-    if config.compute_loss and losses_fwd:
-        n_bwd = losses_bwd_rev["wh_loss"].shape[0]
-        bwd_idx = list(range(n_bwd - 1, -1, -1))
-        bwd = {
-            "wh_loss": losses_bwd_rev["wh_loss"][bwd_idx],
-            "sv_loss": losses_bwd_rev["sv_loss"][bwd_idx],
-            "total_loss": losses_bwd_rev["total_loss"][bwd_idx],
-        }
-        if pad_len > 0:
-            bwd["wh_loss"][0] = np.nan
-            bwd["sv_loss"][0, :] = np.nan
-            bwd["total_loss"][0] = np.nan
-
-        losses = {
-            "wh_loss": np.concatenate([bwd["wh_loss"], losses_fwd["wh_loss"]]),
-            "sv_loss": np.concatenate([bwd["sv_loss"], losses_fwd["sv_loss"]], axis=0),
-            "total_loss": np.concatenate([bwd["total_loss"], losses_fwd["total_loss"]]),
-        }
-
-    return (
-        np.concatenate([ipts_bwd, ipts_fwd], axis=0),
-        np.concatenate([spikes_bwd, spikes_fwd], axis=0),
-        losses,
-    )
+    # The forward pass warms up on the batch before the calibration window;
+    # that batch adapts the state but its output is dropped.
+    fwd = _pass((calib_start, calib_end))
+    fwd_start = max(0, calib_start - fwd.batch_size)
+    fwd.run(fwd_start, source.n_samples, sink=_clipped(calib_start, source.n_samples))
+    if calib_start > 0:
+        _pass(fwd.calibration).run(0, calib_start, reverse=True, sink=_clipped(0, calib_start))
 
 
 def adaptive_batch_process(
     mu_filters_by_window: dict[int, FloatArray],
-    w_sig_by_window: dict[int, FloatArray] | Callable[[int], FloatArray],
-    win_data: dict[int, FloatArray] | Callable[[int], FloatArray],
-    whiten_mats: dict[int, FloatArray],
-    grid_data: dict[int, FloatArray],
-    coordinates: list[int],
-    ltime: int,
+    whiten_mat_by_window: dict[int, FloatArray],
+    grid_data: Mapping[int, SampleSource],  # kept channels per grid, read batch by batch
+    coordinates_plateau: list[int],
+    total_samples: int,
     fsamp: float,
-    nwindows_per_grid: int,
-    win_means_by_window: dict[int, FloatArray] | None = None,
-    batch_ms: int = _DEFAULT_CONFIG.batch_ms,
-    adapt_wh: bool = _DEFAULT_CONFIG.adapt_wh,
-    adapt_sv: bool = _DEFAULT_CONFIG.adapt_sv,
-    adapt_sd: bool = _DEFAULT_CONFIG.adapt_sd,
-    wh_learning_rate: float = _DEFAULT_CONFIG.wh_learning_rate,
-    sv_learning_rate: float = _DEFAULT_CONFIG.sv_learning_rate,
-    cov_alpha: float = _DEFAULT_CONFIG.cov_alpha,
-    spike_prev_weight: int = _DEFAULT_CONFIG.spike_prev_weight,
-    compute_loss: bool = _DEFAULT_CONFIG.compute_loss,
+    nwindows: int,
+    win_mean_by_window: dict[int, FloatArray],
+    params: DecompositionParameters,
     artifact_mask: BoolArray | None = None,
-) -> tuple[FloatArray, list[IntArray], dict[int, dict[str, Any]]]:
-    """Apply adaptive post-processing across all decomposition windows and grids."""
-    config = Config(
-        fsamp=int(fsamp),
-        batch_ms=batch_ms,
-        adapt_wh=adapt_wh,
-        adapt_sv=adapt_sv,
-        adapt_sd=adapt_sd,
-        wh_learning_rate=wh_learning_rate,
-        sv_learning_rate=sv_learning_rate,
-        cov_alpha=cov_alpha,
-        spike_prev_weight=spike_prev_weight,
-        compute_loss=compute_loss,
-    )
-
+    store: ArrayStore | None = None,
+) -> tuple[FloatArray, list[IntArray]]:
+    """Adapt every window and grid in ``params.work_dtype``, writing pulse trains into ``store``."""
     total_mus = sum(f.shape[1] for f in mu_filters_by_window.values() if f.size > 0)
     if total_mus == 0:
-        return np.array([]), [], {}
+        return np.array([]), []
 
-    pulse_t = np.zeros((total_mus, ltime), dtype=np.float64)
-    distime: list[IntArray] = []
+    store = store if store is not None else RamStore()
+    pulse_trains = store.allocate(
+        "pulse_trains_all", (total_mus, total_samples), np.float32, zero=True
+    )
+    found_times: list[IntArray] = []
+    spike_units: list[IntArray] = []
     mu_nb = 0
-    all_losses: dict[int, dict[str, Any]] = {}
 
-    for nwin in sorted(mu_filters_by_window.keys()):
-        filters = mu_filters_by_window[nwin]
+    for win_global in sorted(mu_filters_by_window.keys()):
+        filters = mu_filters_by_window[win_global]
         if filters.size == 0:
             continue
 
-        grid_idx = nwin // max(1, nwindows_per_grid)
-        calib_start = coordinates[nwin * 2]
-
-        win_data_nwin = win_data(nwin) if callable(win_data) else win_data[nwin]
-        w_sig_nwin = w_sig_by_window(nwin) if callable(w_sig_by_window) else w_sig_by_window[nwin]
-
-        if win_means_by_window is not None and nwin in win_means_by_window:
-            win_mean = win_means_by_window[nwin]
-        else:
-            win_mean = np.mean(win_data_nwin, axis=1)
-        win_data_g = win_data_nwin - win_mean[:, None]
-        grid_data_g = grid_data[grid_idx].astype(np.float32) - win_mean.astype(np.float32)[:, None]
-
-        ipts_out, spikes_out, win_losses = _run_adapt_decomp_bidirectional(
-            grid_data_g=grid_data_g,
-            win_data_g=win_data_g,
-            whiten_mat=whiten_mats[nwin],
-            mu_filters=filters,
-            w_sig=w_sig_nwin,
-            calib_start=calib_start,
-            config=config,
+        grid_idx = win_global // max(1, nwindows)
+        calib_start, calib_end = (
+            coordinates_plateau[win_global * 2],
+            coordinates_plateau[win_global * 2 + 1],
+        )
+        grid = grid_data[grid_idx]
+        win_mean = win_mean_by_window[win_global]
+        source = StreamedExtender(
+            grid,
+            whiten_mat_by_window[win_global].shape[0] // grid.shape[0],
+            offset=win_mean,
+            dtype=params.work_dtype,
+            samples_first=True,
             artifact_mask=artifact_mask,
         )
+        rows = slice(mu_nb, mu_nb + filters.shape[1])
 
-        if compute_loss and win_losses:
-            all_losses[nwin] = win_losses
+        def _collect(
+            start: int, pulse_trains_batch: np.ndarray, spikes: np.ndarray, rows: slice = rows
+        ) -> None:
+            stop = min(start + len(pulse_trains_batch), total_samples)
+            pulse_trains[rows, start:stop] = signed_square(
+                pulse_trains_batch[: stop - start].astype(np.float64)
+            ).T
+            t, unit = np.nonzero(spikes[: stop - start])
+            found_times.append(start + t)
+            spike_units.append(rows.start + unit)
 
-        for j in range(filters.shape[1]):
-            pt = signed_square(ipts_out[:, j])
-            pt = pt[:ltime]
-            if artifact_mask is not None:
-                pt[artifact_mask[:ltime]] = 0.0
-            pulse_t[mu_nb, :] = pt
-            # Detection is per batch, so a pair straddling a batch boundary or the
-            # backward/forward seam can still breach the refractory period.
-            spikes_j = np.where(spikes_out[:ltime, j] > 0)[0].astype(int)
-            distime.append(
-                enforce_refractory(spikes_j, pt, fsamp, min_isi_sec=config.spike_dist_ms / 1000.0)
+        _run_bidirectional(
+            source=source,
+            whiten_mat=whiten_mat_by_window[win_global],
+            mu_filters=filters,
+            calib_start=calib_start,
+            calib_end=calib_end,
+            params=params,
+            fsamp=fsamp,
+            sink=_collect,
+        )
+        if artifact_mask is not None:
+            pulse_trains[rows][:, extend_mask(artifact_mask[:total_samples], source.ex_factor)] = (
+                0.0
             )
-            mu_nb += 1
+        mu_nb += filters.shape[1]
 
-    return pulse_t, distime, all_losses
+    times = np.concatenate(found_times) if found_times else np.array([], dtype=int)
+    units = np.concatenate(spike_units) if spike_units else np.array([], dtype=int)
+    order = np.lexsort((times, units))
+    by_unit = np.split(
+        times[order].astype(int), np.searchsorted(units[order], np.arange(1, total_mus))
+    )
+
+    # Detection is per batch, so a pair straddling a batch boundary or the
+    # backward/forward seam can still breach the refractory period.
+    spike_times = [enforce_refractory(by_unit[j], pulse_trains[j], fsamp) for j in range(total_mus)]
+
+    return pulse_trains, spike_times

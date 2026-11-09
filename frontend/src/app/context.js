@@ -11,33 +11,33 @@
  * not in the context; modules import them directly.
  */
 
-/** @typedef {import("./state.js").State} State */
+/** @typedef {import("../state/state.js").State} State */
 /** @typedef {import("./dom.js").Els} Els */
 /** @typedef {ReturnType<typeof import("../api/client.js").createApiClient>} Api */
 /** @typedef {"qc" | "run" | "edit"} StageKey */
 /** @typedef {"import" | StageKey} WorkflowStep A step of the header stepper. */
-/** @typedef {import("./state.js").FileRef} FileRef */
-/** @typedef {import("./state.js").Selection} Selection */
-/** @typedef {import("./state.js").EditMode} EditMode */
-/** @typedef {import("./state.js").EditHistoryEntry} EditHistoryEntry */
+/** @typedef {import("../state/state.js").FileRef} FileRef */
+/** @typedef {import("../state/state.js").Selection} Selection */
+/** @typedef {import("../state/state.js").EditMode} EditMode */
 /** @typedef {import("../io/bids.js").BidsEntities} BidsEntities */
-/** @typedef {import("../editing/operations.js").PulseViewMeta} PulseViewMeta */
 /** @typedef {import("../decomp/params.js").DecomposeParams} DecomposeParams */
 /** @typedef {"emgCanvas" | "auxCanvas"} RoiCanvasId Canvases that take ROI and artifact drags. */
-/** @typedef {"add-spikes" | "add-artifact" | "delete-spikes" | "delete-dr"} RoiAction */
+/** @typedef {"add-spikes" | "add-artifact" | "delete-spikes"} RoiOp */
 
 /**
- * A box drawn on an edit canvas, in samples and pulse-train units.
+ * `add-spikes` / `add-artifact`: the peaks above `yMin` in `[xStart, xEnd]`,
+ * in samples and pulse-train units.
  *
- * @typedef {object} RoiEditRequest
- * @property {number} muIdx
- * @property {number[]} pulse
+ * @typedef {object} RoiAddPayload
+ * @property {number} mu
  * @property {number} xStart
  * @property {number} xEnd
  * @property {number} yMin
- * @property {number} [yMax]
- * @property {number} [fs]
- * @property {number[]} [artifact_times]
+ */
+/**
+ * `delete-spikes`: the discharges and artifacts in the box.
+ *
+ * @typedef {RoiAddPayload & { yMax: number }} RoiDeletePayload
  */
 /** @typedef {"muted" | "success" | "error"} Tone */
 /** @typedef {{ start: number, end: number }} Span */
@@ -53,43 +53,35 @@
 /**
  * @typedef {object} UiService
  * @property {(text: string, tone?: Tone) => void} setStatus
- * @property {(text: string, tone?: Tone) => void} setEditStatus
- * @property {(pct?: number, message?: string, stage?: string) => void} updateProgress
  * @property {(target: WorkflowStep) => void} updateWorkflowStepper
  * @property {() => void} updateStepAvailability
  * @property {(open: boolean) => void} setSettingsOpen
- * @property {() => void} toggleSettingsOpen
- * @property {() => void} ensureSettingsToggleIcon
- * @property {() => void} initLayoutResizePolicy
- * @property {(delay?: number) => void} scheduleLayoutRerender
+ * @property {() => void} scheduleLayoutRerender Redraw the visible stage at the next frame, once however often asked.
  * @property {(target: StageKey) => void} switchStage
- * @property {(options?: { keepLandingVisible?: boolean }) => void} showWorkspace
+ * @property {(target: StageKey) => void} showWorkspace Leave the landing page for `target`'s page.
  * @property {() => void} populateGridTabs
- * @property {(btn: HTMLElement, onChange?: (on: boolean) => void) => void} setupToggle
- * @property {(btn: HTMLElement, onChange?: (on: boolean) => void) => void} setupLockedOnToggle
- * @property {(id: string, show: boolean) => void} toggleConditional
- * @property {(btn: HTMLElement) => boolean} isToggleOn
- * @property {(btn: HTMLElement, on: boolean, labels: { shortSel: string, fullSel: string, prefix: string }) => void} applyLabeledToggle
- * @property {<T>(button: HTMLElement, fn: () => T | Promise<T>) => Promise<T | undefined>} runEditAction
- * @property {(button: HTMLElement, busy: boolean) => void} setEditActionBusy
  */
 
 /**
  * @typedef {object} FileSessionService
  * @property {() => string} getBidsProject
+ * @property {(project: string) => void} setBidsProject Pick `project` in the project tree, and make it the edit session's project; `""` picks "New project…".
+ * @property {() => void} syncBidsProject After the pick or the new name changes: the new-name row, the edit session's project and the remembered pick.
+ * @property {(locked: boolean) => void} setProjectLocked Disable the project tree, the new-name field and Change output folder, or enable them again.
+ * @property {() => Promise<void>} loadProjects Fill the project tree with the output folder's projects, on the last one picked.
+ * @property {() => Promise<void>} onChooseDataFolder Pick another output folder in the native dialog, then refill the project tree from it.
+ * @property {(fileName: string) => void} resetSessionForm The entity fields back to their defaults for a new raw file.
  * @property {() => string[]} getBidsMuscleNames
- * @property {() => { subject?: string, task?: string, session?: string, run?: string, acquisition?: string }} getBidsEntityInputs
- * @property {() => JsonObject} getBidsSaveFields
  * @property {() => JsonObject} collectBidsEntities
+ * @property {() => boolean} checkSessionForm Whether every required session field is filled; if not, mark the empty ones and open the panel on them.
+ * @property {() => boolean} checkPlacementForm Whether the placement fields BIDS requires are filled; if not, mark them and open the panel on them.
  * @property {(entities: Partial<BidsEntities> & { project?: string }) => void} setBidsEntitiesInput
  * @property {(data: JsonObject) => void} applyPreviewMetadata
- * @property {(file: FileRef | null, data?: JsonObject) => void} applySessionInfoFromDecomposition
- * @property {() => void} renderBidsAutoInfo
+ * @property {(file: FileRef | null, data: JsonObject) => void} applySessionInfoFromDecomposition
+ * @property {() => void} prefillHardwareFields Fill the empty manufacturer, device and power-line fields from the file's metadata.
  * @property {() => void} renderBidsMuscleFields
- * @property {(payload: JsonObject, fallbackName?: string) => Promise<{ mode: string, path: string, keptIndices?: number[], editHistory?: EditHistoryEntry[] }>} persistNpzBySaveTarget
- * @property {() => void} clearUploadFormatError
- * @property {() => void} showUnsupportedUploadFormatError
- * @property {(file: FileRef) => "raw" | "decomposition" | "ambiguous_mat" | "unsupported"} detectLandingFileType
+ * @property {(payload: JsonObject, fallbackName?: string) => Promise<{ path: string }>} saveRun
+ * @property {(payload: JsonObject) => JsonObject} withBidsSaveFields
  * @property {(active: boolean) => void} setUploadLoading
  */
 
@@ -97,70 +89,37 @@
  * @typedef {object} QcStage
  * @property {() => void} populateAuxSelector
  * @property {() => void} renderAuxiliaryChannels
- * @property {(gridIdx: number, start?: number, end?: number | null) => Promise<void>} requestQcGridWindow
- * @property {(options?: { silentFailure?: boolean, filepath?: string }) => Promise<boolean>} requestPreview
- * @property {(path: string, name: string, options?: { silentPreviewFailure?: boolean }) => Promise<boolean>} handleRawFilePath
- * @property {(waitForMiniPlots?: boolean) => Promise<void> | void} renderChannelQC
- * @property {(canvasId: RoiCanvasId) => void} enableRoiSelection
+ * @property {() => void} ensureQcTraces Fetch the current grid's channel traces over the first window, unless they are shown or on their way.
+ * @property {(path: string, name: string, options?: { silentFailure?: boolean }) => Promise<boolean>} handleRawFilePath
+ * @property {() => void} renderChannelQC Draw the current grid's channels (the first grid when the data has no other), and ask for its traces.
  * @property {() => void} refreshVisuals
- * @property {(nwin: number) => void} syncRois
- * @property {() => Promise<boolean>} runAutoQc
- * @property {() => void} toggleArtifactMode
- * @property {() => void} removeLastArtifact
+ * @property {() => void} scheduleRefreshVisuals Redraw the QC plots at the next frame, once however often asked.
  * @property {(idx: number) => void} setSelectedGrid
  */
 
 /**
  * @typedef {object} RunStage
- * @property {(gridIdx: number) => number[]} getMuIndicesForGrid
- * @property {() => void} renderMuDropdowns
- * @property {() => void} renderMuExplorer
+ * @property {() => void} renderRunStage Draw the run page for the current run; it is empty without one.
+ * @property {() => void} scheduleRunRender Redraw the run page at the next frame, once however often asked.
  * @property {() => Promise<void>} autoSaveRunDecomposition
  * @property {(msg: JsonObject) => void} handleStreamMessage
- * @property {() => Promise<void>} runDecomposition
  * @property {() => void} updateStartAvailability
  * @property {() => DecomposeParams} buildParams
  */
 
 /**
  * @typedef {object} EditStage
- * @property {(gridIdx: number) => number[]} getEditMuIndices
- * @property {() => void} ensureEditFlagged
- * @property {(muIdx: number) => number[]} getRawPulse
- * @property {(muIdx: number) => number[]} getDisplayPulse
- * @property {() => void} backupEditMu
- * @property {() => void} recomputeEditDirty
- * @property {() => void} refreshEditTotals
- * @property {() => number} getEditTotalSamples
- * @property {() => PulseViewMeta} getPulseViewMeta
  * @property {() => number} getPulsePlotHeight
- * @property {() => number} getDrPlotHeight
- * @property {(entry: EditHistoryEntry) => void} appendEditHistory
  * @property {() => void} resetEditState
  * @property {() => void} refreshEditModeButtons
  * @property {(mode: EditMode | null, message?: string) => void} setEditMode
- * @property {() => void} renderEditDropdowns
- * @property {() => void} renderEditExplorer
- * @property {() => void} renderInstantaneousDr
- * @property {() => void} bindEditCanvas
- * @property {() => void} bindEditDrCanvas
- * @property {() => void} bindEditTimeline
- * @property {(action: RoiAction, payload: RoiEditRequest) => Promise<void>} requestRoiEdit
- * @property {(mode: string) => Promise<void>} requestFilterUpdate
- * @property {() => Promise<void>} updateMuFilter
+ * @property {() => void} renderEditExplorer Settle the MU and view the data allows, draw the edit page, and ask for the pulse window it lacks.
+ * @property {() => void} scheduleEditRender Redraw the edit plots at the next frame, once however often asked.
+ * @property {(op: RoiOp, payload: RoiAddPayload | RoiDeletePayload) => Promise<void>} requestRoiEdit
  * @property {(sel: Selection) => void} addSpikesInSelection
  * @property {(sel: Selection) => void} addArtifactInSelection
  * @property {(sel: Selection) => void} deleteSpikesInSelection
- * @property {(sel: Selection) => void} deleteDrInSelection
- * @property {() => void} restoreEditBackup
- * @property {() => Promise<void>} removeOutliers
- * @property {() => Promise<void>} flagMuForDeletion
- * @property {() => void} resetCurrentMuEdits
- * @property {() => void} duplicateMu
- * @property {() => Promise<void>} removeDuplicateMus
- * @property {() => Promise<void>} saveEditedFile
- * @property {(file: FileRef, path: string) => Promise<void>} loadDecompositionForEdit
- * @property {(path: string) => Promise<void>} loadDecompositionForEditByPath
+ * @property {(path: string, options?: { open?: boolean }) => Promise<void>} loadDecompositionForEditByPath Load a decomposition into Edit; `open: false` stays on the current page.
  */
 
 /** @typedef {Core & UiService & FileSessionService & QcStage & RunStage & EditStage} App */

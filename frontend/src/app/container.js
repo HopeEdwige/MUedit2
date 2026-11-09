@@ -1,34 +1,60 @@
+/**
+ * Starts the app: builds the `app` context, binds every stage's events,
+ * and waits for the backend before enabling the page.
+ */
 import { API_BASE } from "../config.js";
 import { createApiClient } from "../api/client.js";
 import { createApp } from "./create-app.js";
 import { els } from "./dom.js";
-import { apiFetch, apiJson, waitForBackend } from "./http.js";
-import { state } from "./state.js";
+import { apiFetch, apiJson, SESSION_ID, waitForBackend } from "./http.js";
+import { state } from "../state/state.js";
 import { setupEditEvents } from "./stages/edit-stage.js";
+import { restoreEditSession } from "./services/editing-service.js";
+import { setupSessionFormEvents } from "./services/file-session.js";
 import { setupImportEvents } from "./stages/import-stage.js";
 import { setupLayoutEvents } from "./stages/layout-stage.js";
+import { setupQcEvents } from "./stages/qc-stage.js";
 import { setupRunEvents } from "./stages/run-stage.js";
 
 export async function initializeApp() {
   const app = createApp({
     state,
     els,
-    api: createApiClient({ apiFetch, apiJson, API_BASE }),
+    api: createApiClient({
+      apiFetch,
+      apiJson,
+      API_BASE,
+      sessionId: SESSION_ID,
+    }),
+  });
+  // The browser asks before a page with unsaved edits is closed or reloaded.
+  window.addEventListener("beforeunload", (event) => {
+    if (!state.edit.dirty) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+  window.addEventListener("pagehide", (event) => {
+    // A page kept in the back-forward cache can come back with its tokens.
+    if (!event.persisted) app.api.closeSession();
   });
   setupImportEvents(app);
+  setupQcEvents(app);
   setupRunEvents(app);
   setupEditEvents(app);
   setupLayoutEvents(app);
+  setupSessionFormEvents(app);
   app.updateStepAvailability();
   app.updateWorkflowStepper("import");
 
   if (els.browseSignalBtn) els.browseSignalBtn.disabled = true;
   app.setStatus("Connecting to backend…", "muted");
 
-  const ready = await waitForBackend(app.api.healthUrl());
-  if (ready) {
+  if (await waitForBackend(app.api.healthUrl())) {
     if (els.browseSignalBtn) els.browseSignalBtn.disabled = false;
     app.setStatus("", "muted");
+    await app.loadProjects().catch(() => app.setBidsProject(""));
+    // A reloaded page picks up the open edit session.
+    await restoreEditSession(app);
   } else {
     app.setStatus("Backend unreachable — please restart the app", "error");
   }

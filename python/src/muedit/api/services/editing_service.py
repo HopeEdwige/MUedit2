@@ -1,219 +1,135 @@
+"""Edit stage services: the server-side edit session, and the saves of edits and runs."""
+
 from __future__ import annotations
 
 import csv
 import json
 import logging
+import os
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import HTTPException
 from fastapi.responses import Response
 
-from muedit.api.binary import pack_json_f32_payload
+from muedit.api import config
+from muedit.api.binary import frame_response
 from muedit.api.cache import (
-    _get_edit_signal_context,
-    _get_edit_signal_context_by_label,
-    _store_edit_signal_context,
+    get_edit_session,
+    held_run_result,
+    live_edit_logs,
+    resize_edit_session,
+    store_edit_session,
 )
 from muedit.api.common import (
+    bids_root_for,
+    dataset_root_of,
     make_json_safe,
     parse_entity_label,
     require_existing_path,
 )
-from muedit.api.config import DATA_ROOT, resolve_bids_root
+from muedit.api.memory import DEFAULT_SESSION
 from muedit.api.schemas import (
-    EditDeduplicatePayload,
-    EditFilterPayload,
-    EditFlagPayload,
-    EditOutliersPayload,
-    EditRoiPayload,
+    BidsSaveFields,
+    EditOpPayload,
+    EditPrepareGridPayload,
+    EditRecoverPayload,
     EditSavePayload,
-)
-from muedit.api.services.bids_helpers import (
-    _infer_bids_root_from_decomp_path,
-    _load_bids_grid,
-    _parse_all_bids_entities,
-    _parse_subject_session_from_entity_label,
-    _read_bids_channels_sidecar,
-    read_bids_sidecar_meta,
-)
-from muedit.api.services.edit_helpers import (
-    _coerce_bool_param,
-    _coerce_dup_tol,
-    _expected_grid_count,
-    _generate_mu_uids,
-    _normalize_flagged,
-    _normalize_mu_grid_index,
-    _normalize_muscle_names,
-    _pad_grid_names,
+    EditSessionSavePayload,
 )
 from muedit.decomp.decomposition_file import (
-    build_pulse_trains_from_distimes,
-    load_decomposition_file,
-    load_decomposition_signal_context,
-    normalize_distimes,
+    load_decomposition,
+    pack_csr,
     save_decomposition_npz,
     save_editlog,
 )
-from muedit.decomp.postprocess import remove_duplicates_by_grid
+from muedit.decomp.postprocess import dedup_survivors
 from muedit.decomp.preprocess import build_manual_artifact_mask
-from muedit.decomp.types import DEFAULT_PEEL_OFF_WIN_SEC, DecompositionParameters
-from muedit.editing.operations import (
-    add_artifact_in_roi,
-    add_spikes_in_roi,
-    delete_artifacts_in_roi,
-    delete_high_discharge_rate_spikes_in_roi,
-    delete_spikes_in_roi,
-    remove_discharge_rate_outliers,
-    update_motor_unit_filter_window,
+from muedit.decomp.types import DecompositionParameters
+from muedit.editing.edit_log import EditLog, find_recoverable
+from muedit.editing.session import (
+    SESSION_EXPIRED,
+    Change,
+    EditError,
+    EditSession,
+    initial_mu_uids,
+    timestamp,
 )
+from muedit.errors import MueditError
+from muedit.io._mat import parse_name_list
 from muedit.io.bids import (
+    BidsEntities,
+    BidsFieldError,
+    bids_emg_fields,
     export_bids_emg,
+    export_bids_events,
     export_bids_mu_derivatives,
-    write_bids_dataset_description,
+    form_over_loader_meta,
+    read_bids_emg_grid,
+    read_channel_groups,
+    read_channels_summary,
+    read_sidecar_meta,
+    resolve_bids_channels_tsv,
+    write_participant,
 )
-from muedit.models import LoadedDecomposition
-from muedit.signal.grid import format_hdemg_signal
+from muedit.io.npz import RowSource
+from muedit.models import (
+    BoolArray,
+    EditSignalContext,
+    FloatArray,
+    IntArray,
+    LoadedDecomposition,
+    resident_nbytes,
+    spike_array,
+)
+from muedit.signal.grid import fallback_grid_name
+from muedit.storage import SessionStore, copy_into
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class EditLoadResult:
-    """What ``/edit/load-by-path`` returns: a decomposition plus its edit session."""
-
-    decomposition: LoadedDecomposition
-    file_label: str
-    edit_signal_token: str | None = None  # set when the file embeds the raw EMG
-    project: str | None = None  # BIDS project folder, when the file sits in one
-    # Restored from the ``.json`` edit log saved next to the decomposition.
-    mu_uids: list[Any] | None = None
-    edit_history: list[Any] | None = None
-    artifact_times: list[Any] | None = None
-    # Participant and hardware fields from the BIDS sidecars.
-    sidecar_meta: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        """JSON payload: the decomposition fields plus the session fields that are set."""
-        out = self.decomposition.to_dict()
-        out["file_label"] = self.file_label
-        session = {
-            "edit_signal_token": self.edit_signal_token,
-            "project": self.project,
-            "mu_uids": self.mu_uids,
-            "edit_history": self.edit_history,
-            "artifact_times": self.artifact_times,
-        }
-        out.update({key: value for key, value in session.items() if value is not None})
-        out.update(self.sidecar_meta)
-        return out
+def _expected_grid_count(decomp: LoadedDecomposition) -> int:
+    """Number of grids implied by the names, muscles and MU-to-grid indices."""
+    from_index = max(decomp.mu_grid_index) + 1 if decomp.mu_grid_index else 0
+    return max(1, len(decomp.grid_names), len(decomp.muscle_names), from_index)
 
 
-def _encode_edit_load_f32(loaded: dict[str, Any]) -> bytes | None:
-    """Custom MELD v1 binary: JSON metadata header + float32 pulse matrix."""
-    pulse_raw = loaded.get("pulse_trains_full")
-    if pulse_raw is None:
-        return None
-    pulse = np.asarray(pulse_raw, dtype=np.float32)
-    if pulse.ndim != 2:
-        return None
-    metadata = dict(loaded)
-    metadata.pop("pulse_trains_full", None)
-    metadata["pulse_shape"] = [int(pulse.shape[0]), int(pulse.shape[1])]
-    metadata["pulse_dtype"] = "float32"
-    metadata["pulse_binary"] = True
-    return pack_json_f32_payload(b"MELD", metadata, pulse)
+def _pad_grid_names(names: list[str], expected_count: int, fallback: list[str]) -> list[str]:
+    out = [str(x).strip() for x in (names or []) if str(x).strip()]
+    if not out:
+        out = [str(x).strip() for x in (fallback or []) if str(x).strip()]
+    target_count = max(int(expected_count or 0), len(out))
+    while len(out) < target_count:
+        out.append(fallback_grid_name(len(out)))
+    return out
 
 
-def _wrap_edit_load_binary(loaded: dict[str, Any]) -> Response | dict[str, Any]:
-    """Encode a loaded decomposition as f32 binary, falling back to JSON when not encodable."""
-    blob = _encode_edit_load_f32(loaded)
-    if blob is None:
-        return loaded
-    return Response(
-        content=blob,
-        media_type="application/octet-stream",
-        headers={"x-muedit-format": "edit-load-f32-v1"},
-    )
+def _coerce_dup_tol(raw: Any, default: float = 0.3) -> float:
+    """Coerce a ``duplicatesthresh`` parameter to float, unwrapping nested lists."""
+    while isinstance(raw, (list, tuple, np.ndarray)) and np.ndim(raw) > 0:
+        raw = raw[0] if len(raw) > 0 else default
+    try:
+        return float(raw)
+    except (TypeError, ValueError) as exc:
+        raise MueditError(
+            f"duplicatesthresh must be a number; got {raw!r}", "parameters.duplicatesthresh"
+        ) from exc
 
 
-def load_decomposition_from_path(filepath: str) -> dict[str, Any]:
-    if require_existing_path(filepath).suffix.lower() not in {".npz", ".mat"}:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "field": "path",
-                "reason": "Unsupported decomposition format. Expected .mat or .npz",
-            },
-        )
-    file_label = Path(filepath).name
-    decomp = load_decomposition_file(filepath)
-    result = EditLoadResult(decomposition=decomp, file_label=file_label)
-    signal_ctx = load_decomposition_signal_context(filepath)
-    if signal_ctx:
-        result.edit_signal_token = _store_edit_signal_context(signal_ctx, file_label)
-
-    bids_root = _infer_bids_root_from_decomp_path(filepath)
-    if bids_root is not None:
-        try:
-            rel = bids_root.relative_to(DATA_ROOT)
-            result.project = rel.parts[0] if rel.parts else ""
-        except ValueError:
-            result.project = ""
-        try:
-            entity_label = parse_entity_label(file_label)
-            subject, session = _parse_subject_session_from_entity_label(entity_label)
-            emg_dir = bids_root / f"sub-{subject}"
-            if session:
-                emg_dir = emg_dir / f"ses-{session}"
-            emg_dir = emg_dir / "emg"
-            channels_path = emg_dir / f"{entity_label}_channels.tsv"
-            if not channels_path.exists():
-                channels_path = emg_dir / f"{entity_label}_emg_channels.tsv"  # backward compat
-            if channels_path.exists():
-                grid_names, muscles, fsamp = _read_bids_channels_sidecar(channels_path)
-                expected_count = _expected_grid_count(decomp)
-                if grid_names:
-                    decomp.grid_names = _pad_grid_names(
-                        grid_names, expected_count, decomp.grid_names
-                    )
-                if muscles:
-                    decomp.muscle = muscles
-                if fsamp and fsamp > 0:
-                    decomp.fsamp = fsamp
-
-            result.sidecar_meta = read_bids_sidecar_meta(bids_root, entity_label)
-
-        except (ValueError, OSError, csv.Error, KeyError):
-            pass  # best-effort; I/O and parse errors are non-fatal
-
-    editlog_path = Path(filepath).with_suffix(".json")
-    if editlog_path.exists():
-        try:
-            with editlog_path.open("r", encoding="utf-8") as fh:
-                editlog = json.load(fh)
-            if isinstance(editlog.get("mu_uids"), list):
-                result.mu_uids = editlog["mu_uids"]
-            if isinstance(editlog.get("history"), list):
-                result.edit_history = editlog["history"]
-            if isinstance(editlog.get("artifact_times"), list):
-                result.artifact_times = editlog["artifact_times"]
-        except (OSError, ValueError, KeyError):
-            pass  # best-effort; missing or corrupt editlog is non-fatal
-
-    return make_json_safe(result.to_dict())
-
-
-def load_decomposition_binary_from_path(filepath: str) -> Response | dict[str, Any]:
-    loaded = load_decomposition_from_path(filepath)
-    return _wrap_edit_load_binary(loaded)
+def _coerce_bool_param(raw: Any) -> bool:
+    """Coerce a boolean parameter such as ``duplicatesbgrids`` (MATLAB stores 0/1), unwrapping nested lists."""
+    while isinstance(raw, (list, tuple, np.ndarray)) and np.ndim(raw) > 0:
+        raw = raw[0] if len(raw) > 0 else False
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)
 
 
 def _dedup(
-    distimes: list[list[int]],
+    spike_times: list[IntArray],
     mu_grid_index: list[int],
     parameters: dict[str, Any],
     fsamp: float,
@@ -224,93 +140,328 @@ def _dedup(
         duplicatesthresh=_coerce_dup_tol(parameters.get("duplicatesthresh", 0.3)),
         duplicatesbgrids=_coerce_bool_param(parameters.get("duplicatesbgrids", True)),
     )
-    _, _, _, kept = remove_duplicates_by_grid(
-        build_pulse_trains_from_distimes(distimes, total_samples),
-        [np.asarray(d, dtype=int) for d in distimes],
+    kept, _ = dedup_survivors(
+        spike_times,
         mu_grid_index,
         max(mu_grid_index, default=0) + 1,
         params,
         fsamp,
+        total_samples,
     )
-    return sorted(kept)
+    return kept
 
 
-def _clean_distimes(spikes: list[int]) -> list[int]:
-    return sorted({int(v) for v in spikes if int(v) >= 0})
+# ── opening a decomposition ──────────────────────────────────────────────────
 
 
-def _export_bids_from_mat_context(
-    bids_root: Path,
-    entity_label: str,
-    edit_signal_token: str | None,
-    file_label: str | None,
-    fsamp: float | None,
-    grid_names: list[str],
-    muscle_names: list[str],
-    parameters: dict[str, Any],
-    powerline_freq: float | None = None,
-    manufacturer: str | None = None,
-    manufacturers_model_name: str | None = None,
-    placement_scheme: str | None = None,
-    placement_scheme_description: str | None = None,
-    task_description: str | None = None,
-    software_versions: str | None = None,
-) -> dict[str, str] | None:
-    """Best-effort BIDS EMG export using the raw signal cached from a .mat load."""
-    ctx = _get_edit_signal_context(edit_signal_token) or _get_edit_signal_context_by_label(
-        file_label
+@dataclass
+class _FileExtras:
+    """What the files around a decomposition add: BIDS sidecars and the saved edit log."""
+
+    project: str | None = None
+    bids_root: Path | None = None
+    sidecar_meta: dict[str, Any] = field(default_factory=dict)
+    mu_uids: list[Any] | None = None
+    history: list[Any] | None = None
+    artifact_times: list[Any] | None = None
+
+
+def _file_extras(file_path: str, file_label: str, decomp: LoadedDecomposition) -> _FileExtras:
+    """Read the BIDS sidecars and ``.json`` edit log next to a decomposition; updates ``decomp``."""
+    extras = _FileExtras()
+    bids_root = dataset_root_of(file_path)
+    if bids_root is not None:
+        extras.bids_root = bids_root
+        extras.project = config.project_of(bids_root)
+        try:
+            entity_label = parse_entity_label(file_label)
+            extras.sidecar_meta = read_sidecar_meta(bids_root, entity_label)
+            emg_dir = BidsEntities.parse(entity_label).emg_dir(bids_root)
+            channels_tsv = resolve_bids_channels_tsv(emg_dir, entity_label)
+            grid_names, muscle_names, fsamp = read_channels_summary(channels_tsv)
+            if grid_names:
+                decomp.grid_names = _pad_grid_names(
+                    grid_names, _expected_grid_count(decomp), decomp.grid_names
+                )
+            if muscle_names:
+                decomp.muscle_names = muscle_names
+            if fsamp and fsamp > 0:
+                decomp.fsamp = fsamp
+        except (ValueError, OSError, csv.Error, KeyError) as exc:
+            logger.warning("Cannot read the BIDS sidecars of %s: %s", file_path, exc)
+
+    editlog_path = Path(file_path).with_suffix(".json")
+    if editlog_path.exists():
+        try:
+            with editlog_path.open("r", encoding="utf-8") as fh:
+                editlog = json.load(fh)
+            if isinstance(editlog.get("mu_uids"), list):
+                extras.mu_uids = editlog["mu_uids"]
+            if isinstance(editlog.get("history"), list):
+                extras.history = editlog["history"]
+            if isinstance(editlog.get("artifact_times"), list):
+                extras.artifact_times = editlog["artifact_times"]
+        except (OSError, ValueError, KeyError) as exc:
+            logger.warning("Cannot read the edit log %s: %s", editlog_path, exc)
+    return extras
+
+
+def _dataset_root(edit: EditSession, project: str | None) -> Path:
+    """The dataset the file was opened from while its project is unchanged, else the project's."""
+    if edit.bids_root is not None and (project or "").strip() == edit.meta.get("project"):
+        return edit.bids_root
+    return bids_root_for(project)
+
+
+def _session_pulse_trains(decomp: LoadedDecomposition, store: SessionStore) -> FloatArray | None:
+    """The file's pulse trains as float32 outside the heap, or None when it has none."""
+    pulse_trains = decomp.pulse_trains
+    n_mu, total = len(decomp.spike_times), int(decomp.total_samples)
+    if pulse_trains.ndim != 2 or n_mu == 0 or pulse_trains.shape != (n_mu, total):
+        return None
+    if pulse_trains.dtype != np.float32 or resident_nbytes(pulse_trains):
+        pulse_trains = copy_into(store, "pulse", pulse_trains)
+    return pulse_trains
+
+
+def _new_session(
+    file_path: str,
+    decomp: LoadedDecomposition,
+    signal: EditSignalContext | None,
+    store: SessionStore,
+) -> EditSession:
+    file_label = Path(file_path).name
+    extras = _file_extras(file_path, file_label, decomp)
+    n_mu = len(decomp.spike_times)
+    fsamp = float(decomp.fsamp)
+    total = int(decomp.total_samples)
+    parameters = dict(decomp.parameters)
+    entity_label = parse_entity_label(file_label)
+
+    def bids_grid(
+        project: str | None, grid: int, into: SessionStore
+    ) -> tuple[FloatArray, float, IntArray] | None:
+        try:
+            return read_bids_emg_grid(_dataset_root(edit, project), entity_label, grid, into)
+        except (ValueError, FileNotFoundError):
+            return None  # not in a BIDS dataset: the session refits on its embedded EMG
+
+    def duplicates(spike_times: list[IntArray], mu_grid_index: list[int]) -> list[int]:
+        if fsamp <= 0:
+            raise EditError("fsamp is required for deduplication")
+        return _dedup(spike_times, mu_grid_index, parameters, fsamp, total)
+
+    uids = extras.mu_uids
+    edit = EditSession(
+        store=store,
+        fsamp=fsamp,
+        total_samples=total,
+        spike_times=decomp.spike_times,
+        pulse_trains=_session_pulse_trains(decomp, store),
+        mu_grid_index=decomp.mu_grid_index,
+        mu_uids=uids if uids and len(uids) == n_mu else initial_mu_uids(decomp.mu_grid_index),
+        artifact_times=extras.artifact_times,
+        history=extras.history,
+        signal=signal,
+        bids_grid=bids_grid,
+        duplicates=duplicates,
     )
-    if ctx is None:
-        return None  # non-MAT source or context expired
-    if ctx.data.size == 0:
-        return None  # mask-only context has no raw EMG to export
+    decomp.pulse_trains = np.zeros((0, 0), dtype=np.float32)
+    edit.bids_root = extras.bids_root
+    if len(decomp.sil) == n_mu:
+        edit.sil_by_uid = dict(zip(edit.mu_uids, map(float, decomp.sil), strict=True))
+    edit.meta = {
+        "file_label": file_label,
+        "source_path": str(Path(file_path).resolve()),
+        "fsamp": fsamp or None,
+        "total_samples": total,
+        "grid_names": list(decomp.grid_names),
+        "rois": [(int(s), int(e)) for s, e in decomp.rois],
+        "parameters": parameters,
+        "muscle_names": list(decomp.muscle_names),
+        "sil": [float(x) for x in decomp.sil],
+        **({"project": extras.project} if extras.project is not None else {}),
+        **extras.sidecar_meta,
+    }
+    return edit
 
-    entities = _parse_all_bids_entities(entity_label)
+
+def open_edit_session(file_path: str, session: str = DEFAULT_SESSION) -> Response:
+    """Open a decomposition for editing: its fields, discharge times and ``recoverable_edits``."""
+    require_existing_path(file_path)
+    store = SessionStore.create("edit")
     try:
-        meta = ctx.loader_meta
-        paths = export_bids_emg(
-            data=ctx.data,
-            fsamp=float(fsamp or ctx.fsamp),
-            grid_names=ctx.grid_names or grid_names,
-            coordinates=ctx.coordinates,
-            discard_channels=ctx.emgmask,
-            bids_root=bids_root,
-            ied=ctx.ied,
-            subject=entities["sub"] or "01",
-            task=entities["task"] or "task",
-            run=entities["run"],
-            session=entities["ses"],
-            acquisition=entities["acq"],
-            recording=entities["recording"],
-            target_muscle=muscle_names
-            if len(muscle_names) > 1
-            else (muscle_names[0] if muscle_names else None),
-            aux_data=ctx.aux_data,
-            aux_names=ctx.aux_names or None,
-            # User-editable fields take priority; fall back to loader ctx, then hardcoded default
-            manufacturer=manufacturer or meta.get("manufacturer"),
-            manufacturers_model_name=manufacturers_model_name or meta.get("device_name"),
-            powerline_freq=powerline_freq or meta.get("powerline_freq") or 50.0,
-            placement_scheme=placement_scheme or "ChannelSpecific",
-            placement_scheme_description=placement_scheme_description,
-            task_description=task_description,
-            software_versions=software_versions,
-            # Loader-only fields — taken directly from ctx
-            units=meta.get("units") or "uV",
-            hardware_filters=meta.get("hardware_filters"),
-            gain=meta.get("gains"),
-            low_cutoff=meta.get("emg_hpf"),
-            high_cutoff=meta.get("emg_lpf"),
-            aux_gain=meta.get("aux_gains"),
-            aux_low_cutoff=meta.get("aux_hpf"),
-            aux_high_cutoff=meta.get("aux_lpf"),
-            aux_units=meta.get("aux_units"),
-            recording_type=meta.get("recording_type") or "continuous",
-            software_filters=meta.get("software_filters"),
-        )
-        return {k: str(v) for k, v in paths.items()}
-    except Exception:  # noqa: BLE001
-        return None  # never block the primary save on BIDS export error
+        decomp, signal = load_decomposition(file_path, store, binary_trains=False)
+        edit = _new_session(file_path, decomp, signal, store)
+    except BaseException:
+        store.close()
+        raise
+    # Replaces the tab's previous session only now: a file that fails to open leaves it open.
+    token = store_edit_session(edit, session)
+    # Before edit.lock: the budget lock is never taken under it (a dropped session closes under it).
+    live_logs = live_edit_logs()
+    with edit.lock:
+        _check_open(edit)
+        # Created first: a log another tab opens meanwhile is in its live set or has edits.
+        edit.log = EditLog.create(file_path, token)
+        if edit.log is not None:
+            live_logs.add(edit.log.path)
+        edit.recovery = find_recoverable(file_path, live_logs)
+        return _state_response(edit, token)
+
+
+def _expired() -> MueditError:
+    return MueditError(SESSION_EXPIRED, "token")
+
+
+def _require_session(token: str, session: str) -> EditSession:
+    edit = get_edit_session(token, session)
+    if edit is None:
+        raise _expired()
+    return edit
+
+
+def _check_open(edit: EditSession) -> None:
+    """Under ``edit.lock``: the 400 ``_require_session`` gives, for a session closed since."""
+    if edit.closed:
+        raise _expired()
+
+
+def _per_mu(edit: EditSession) -> dict[str, Any]:
+    """The small per-MU arrays every response carries in full."""
+    return {
+        "n_mu": edit.n_mu,
+        "mu_uids": list(edit.mu_uids),
+        "mu_grid_index": list(edit.mu_grid_index),
+        "flagged": list(edit.flagged),
+        "versions": list(edit.versions),
+        "has_pulse": [edit.has_pulse(i) for i in range(edit.n_mu)],
+        "dirty": edit.dirty,
+        "can_undo": edit.can_undo,
+        "crash_recovery": edit.log is not None,  # unsaved edits survive a crash of the app
+    }
+
+
+def _spike_arrays(spike_times: list[IntArray]) -> dict[str, tuple[Any, str]]:
+    values, offsets = pack_csr(spike_times, np.int32)
+    return {"spikes": (values, "i4"), "spike_offsets": (offsets, "i8")}
+
+
+#: Log entries a state or save response carries; the sidecar keeps the whole log.
+HISTORY_TAIL = 100
+
+
+def _history_tail(edit: EditSession) -> dict[str, Any]:
+    start = edit.history_tail_start(HISTORY_TAIL)
+    return {"edit_history": edit.history[start:], "edit_history_start": start}
+
+
+def _state_response(edit: EditSession, token: str, **extra: Any) -> Response:
+    recovery = edit.recovery
+    meta = {
+        **edit.meta,
+        "token": token,
+        **_per_mu(edit),
+        **_history_tail(edit),
+        "recoverable_edits": recovery.edits if recovery is not None else 0,
+        **extra,
+    }
+    return frame_response(meta, _spike_arrays(edit.spike_times))
+
+
+def _change_response(edit: EditSession, change: Change) -> Response:
+    meta = {
+        **_per_mu(edit),
+        "changed": change.changed,
+        "history_start": change.history_start,
+        "history": edit.history[change.history_start :],
+        **({"kept_indices": change.kept} if change.kept is not None else {}),
+        **change.info,
+    }
+    return frame_response(meta, _spike_arrays([edit.spike_times[i] for i in change.changed]))
+
+
+def edit_session_state(token: str, session: str = DEFAULT_SESSION) -> Response:
+    """The whole state of an open session, for a page that was reloaded; the tab takes it over."""
+    edit = _require_session(token, session)
+    with edit.lock:
+        _check_open(edit)
+        return _state_response(edit, token)
+
+
+def apply_edit(op: str, payload: EditOpPayload, session: str = DEFAULT_SESSION) -> Response:
+    """Run one edit; the frame holds what changed."""
+    edit = _require_session(payload.token, session)
+    args = payload.model_dump(exclude_unset=True, exclude={"token"})
+    with edit.lock:
+        change = edit.apply(op, args)
+        response = _change_response(edit, change)
+    resize_edit_session(payload.token)
+    return response
+
+
+def recover_edits(payload: EditRecoverPayload, session: str = DEFAULT_SESSION) -> Response:
+    """Replay the unsaved edits an earlier session left for this file, or drop them."""
+    edit = _require_session(payload.token, session)
+    with edit.lock:
+        _check_open(edit)
+        recovery, edit.recovery = edit.recovery, None
+        applied = 0
+        if recovery is not None:
+            try:
+                if payload.apply:
+                    applied = edit.replay(recovery.records)
+            finally:
+                # Replayed edits are in this session's own log now; a failed replay is not retried.
+                recovery.discard()
+        response = _state_response(edit, payload.token, recovered_edits=applied)
+    resize_edit_session(payload.token)
+    return response
+
+
+def prepare_edit_grid(payload: EditPrepareGridPayload, session: str = DEFAULT_SESSION) -> None:
+    """Filter a grid's EMG now, so its first filter update does not wait for it; edits go on."""
+    edit = _require_session(payload.token, session)
+    edit.prepare_grid(payload.project, payload.grid)
+
+
+# ── saving ───────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _SaveRequest:
+    """Everything a save writes, whoever holds the edits."""
+
+    spike_times: list[IntArray]
+    flagged: list[bool]
+    mu_grid_index: list[int]
+    mu_uids: list[str]
+    history: list[dict[str, Any]]
+    artifact_times: list[IntArray]
+    fsamp: float
+    total_samples: int
+    grid_names: list[str]
+    parameters: dict[str, Any]
+    form: BidsSaveFields
+    pulse_trains: Callable[
+        [list[int]], FloatArray | RowSource | None
+    ]  # pulse trains of the kept MUs
+    muscle_names: list[str] = field(default_factory=list)  # the file's, for a form that names none
+    sil: list[float | None] | None = None  # per MU; None where unknown
+    rois: list[tuple[int, int]] | None = None
+    target_segments: dict[str, Any] | None = None  # a run's; else the opened file's
+    artifact_mask: BoolArray | None = None
+    signal: EditSignalContext | None = None  # raw EMG for the BIDS export
+    bids_root: Path | None = None  # where the files go; else the form's project
+    subject: str | None = None  # the subject a save back into the file's own dataset keeps
+    before_write: Callable[[Path], None] | None = None
+
+    @property
+    def segments(self) -> dict[str, Any] | None:
+        """The segmented target the saved file carries."""
+        if self.target_segments is not None or self.signal is None:
+            return self.target_segments
+        return self.signal.target_segments
 
 
 def _save_removal_entry(entry_type: str, removed_uids: list[str]) -> dict[str, Any]:
@@ -320,510 +471,346 @@ def _save_removal_entry(entry_type: str, removed_uids: list[str]) -> dict[str, A
         "on_save": True,
         "removed_count": len(removed_uids),
         "removed_mu_uids": removed_uids,
-        "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "timestamp": timestamp(),
     }
 
 
-def save_edits(payload: EditSavePayload) -> dict[str, Any]:
-    distimes = normalize_distimes(payload.distimes or payload.discharge_times or [])
-    pulse_trains_raw = payload.pulse_trains
-    total_samples = payload.total_samples
-    if total_samples <= 0:
-        raise HTTPException(status_code=400, detail="total_samples is required to save edits")
+def _export_bids_emg(
+    req: _SaveRequest,
+    bids_root: Path,
+    entity_label: str,
+    grid_names: list[str],
+    muscle_names: list[str],
+    meta: dict[str, Any],
+    warnings: list[str],
+) -> tuple[dict[str, str] | None, str | None]:
+    """Best-effort BIDS EMG export of the raw EMG a decomposition file embeds: its paths, or why not."""
+    ctx = req.signal
+    if ctx is None or ctx.data.size == 0 or ctx.prefiltered:
+        # No raw EMG: a mask-only context, or a v1 .npz holding filtered EMG.
+        return None, None
 
-    fsamp = payload.fsamp
-    if fsamp is None:
-        raise HTTPException(status_code=400, detail="fsamp is required to save edits")
-    mu_grid_index = _normalize_mu_grid_index(payload.mu_grid_index, len(distimes))
-    expected_grid_count = (max(mu_grid_index) + 1) if mu_grid_index else 1
-    grid_names = _pad_grid_names(payload.grid_names or [], expected_grid_count, [])
-    parameters = payload.parameters or {}
-    muscle_names = _normalize_muscle_names(payload.muscle or payload.muscle_names)
+    entities = BidsEntities.parse(entity_label)
+    fsamp = float(req.fsamp or ctx.fsamp)
+    try:
+        paths = export_bids_emg(
+            data=ctx.data,
+            fsamp=fsamp,
+            grid_names=ctx.grid_names or grid_names,
+            coordinates=ctx.coordinates,
+            discard_channels=ctx.discard_channels,
+            bids_root=bids_root,
+            ied=ctx.ied,
+            subject=entities.subject,
+            task=entities.task or "task",
+            run=entities.run,
+            session=entities.session,
+            acquisition=entities.acquisition,
+            recording=entities.recording,
+            aux_data=ctx.aux_data,
+            aux_names=ctx.aux_names or None,
+            **bids_emg_fields(meta, muscle_names, req.form.task_description),
+        )
+    except BidsFieldError as exc:
+        return None, str(exc)  # the save itself goes on
+    except Exception:  # noqa: BLE001
+        logger.warning("BIDS EMG export failed", exc_info=True)
+        return None, "The BIDS EMG export failed; see the server log."
+    exported = {k: str(v) for k, v in paths.items()}
+    try:
+        events = export_bids_events(
+            paths["edf"], fsamp, aux_data=ctx.aux_data, target_segments=req.segments
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("BIDS events export failed", exc_info=True)
+        warnings.append("The BIDS events.tsv was not written; see the server log.")
+    else:
+        if events is not None:
+            exported["events_tsv"] = str(events)
+    return exported, None
 
+
+def _kept_mus(
+    req: _SaveRequest, parameters: dict[str, Any]
+) -> tuple[list[int], list[dict[str, Any]]]:
+    """The request's MUs the file keeps, in order, and the log entries for those it drops."""
+    kept = list(range(len(req.spike_times)))
+    entries: list[dict[str, Any]] = []
+    # Unset (None) form fields leave both steps on.
+    if req.form.remove_flagged is not False and kept:
+        dropped = [i for i in kept if req.flagged[i]]
+        kept = [i for i in kept if not req.flagged[i]]
+        if dropped:
+            entries.append(_save_removal_entry("remove_flagged", [req.mu_uids[i] for i in dropped]))
+    if req.form.remove_duplicates is not False and len(kept) > 1 and req.fsamp > 0:
+        survivors = _dedup(
+            [req.spike_times[i] for i in kept],
+            [req.mu_grid_index[i] for i in kept],
+            parameters,
+            req.fsamp,
+            req.total_samples,
+        )
+        survived = set(survivors)
+        dropped = [i for j, i in enumerate(kept) if j not in survived]
+        kept = [kept[j] for j in survivors]
+        if dropped:
+            entries.append(
+                _save_removal_entry("remove_duplicates", [req.mu_uids[i] for i in dropped])
+            )
+    return kept, entries
+
+
+def _file_subject(file_label: str | None) -> str | None:
+    """The subject a decomposition file's BIDS name gives, if it has one."""
+    try:
+        return BidsEntities.parse(parse_entity_label(file_label or "")).subject
+    except ValueError:
+        return None
+
+
+def _save_target(req: _SaveRequest) -> tuple[Path, str, Path]:
+    """The BIDS dataset, the recording's entity label, and the ``_edited.npz`` path in its derivatives."""
+    bids_root = req.bids_root if req.bids_root is not None else bids_root_for(req.form.project)
+    try:
+        entity_label = req.form.entity_label or parse_entity_label(req.form.file_label or "")
+        entities = BidsEntities.parse(entity_label)
+    except ValueError as exc:
+        raise MueditError(str(exc), "entity_label") from exc
+    if req.subject is not None and entities.subject != req.subject:
+        raise MueditError(
+            f"The file is sub-{req.subject}'s: saving it as sub-{entities.subject} "
+            f"would write it into another subject's folder of {bids_root}. Save it under "
+            "its own subject, or into another project",
+            "entity_label",
+        )
+    decomp_dir = entities.derivative_dir(bids_root, "decomp")
+    return bids_root, entity_label, decomp_dir / f"{entity_label}_edited.npz"
+
+
+def _raw_grid_groups(bids_root: Path, entity_label: str) -> list[str] | None:
+    """The ``group`` of each grid in the recording's raw channels.tsv, when it has one."""
+    try:
+        emg_dir = BidsEntities.parse(entity_label).emg_dir(bids_root)
+        return read_channel_groups(resolve_bids_channels_tsv(emg_dir, entity_label)) or None
+    except (OSError, ValueError, csv.Error):
+        return None
+
+
+def _export_mu_derivatives(
+    req: _SaveRequest, kept: list[int], bids_root: Path, entity_label: str, warnings: list[str]
+) -> dict[str, str] | None:
+    """Best-effort discharge-time derivatives of the kept MUs: their paths, or None."""
+    if not kept or req.fsamp <= 0:
+        return None
+    loader_labels = (req.signal.loader_meta if req.signal else {}).get("grid_labels")
+    try:
+        paths = export_bids_mu_derivatives(
+            spike_times=[req.spike_times[i] for i in kept],
+            fsamp=req.fsamp,
+            bids_root=bids_root,
+            entity_label=entity_label,
+            mu_uids=[req.mu_uids[i] for i in kept],
+            mu_grid_index=[req.mu_grid_index[i] for i in kept],
+            grid_labels=_raw_grid_groups(bids_root, entity_label) or loader_labels,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("BIDS derivatives export failed", exc_info=True)
+        warnings.append("The motor unit derivatives were not written; see the server log.")
+        return None
+    return {k: str(v) for k, v in paths.items()}
+
+
+def _write_decomposition(
+    req: _SaveRequest, out_path: Path, kept: list[int], editlog: dict[str, Any], **npz: Any
+) -> None:
+    """Write the ``.npz`` and its edit-log sidecar, replacing both or neither."""
+    log_path = out_path.with_suffix(".json")
+    npz_tmp = out_path.with_name(f".{out_path.stem}.saving.npz")
+    log_tmp = log_path.with_name(f".{log_path.stem}.saving.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if req.before_write is not None:
+        req.before_write(out_path)
+    try:
+        save_decomposition_npz(
+            npz_tmp,
+            pulse_trains=req.pulse_trains(kept),
+            spike_times=[req.spike_times[i] for i in kept],
+            fsamp=req.fsamp,
+            mu_grid_index=[req.mu_grid_index[i] for i in kept],
+            total_samples=req.total_samples,
+            artifact_mask=req.artifact_mask,
+            rois=req.rois,
+            target_segments=req.segments,
+            **npz,
+        )
+        save_editlog(log_tmp, **editlog)
+        # Both are complete before either replaces the previous save.
+        os.replace(npz_tmp, out_path)
+        os.replace(log_tmp, log_path)
+    finally:
+        npz_tmp.unlink(missing_ok=True)
+        log_tmp.unlink(missing_ok=True)
+
+
+def _save(req: _SaveRequest) -> tuple[dict[str, Any], list[int], list[dict[str, Any]]]:
+    """Write the edited decomposition and BIDS files; return the response, kept MUs, drop log."""
+    form = req.form
+    grid_names = _pad_grid_names(req.grid_names, max(req.mu_grid_index, default=0) + 1, [])
+    parameters = dict(req.parameters)
+    muscle_names = parse_name_list(form.muscle_names) or list(req.muscle_names)
     if muscle_names and not parameters.get("target_muscle"):
         parameters["target_muscle"] = muscle_names if len(muscle_names) > 1 else muscle_names[0]
 
-    pulse_trains = None
-    if pulse_trains_raw is not None:
-        try:
-            pulse_trains = np.array(pulse_trains_raw, dtype=float)
-        except (TypeError, ValueError):
-            pulse_trains = None
-    if (
-        pulse_trains is None
-        or pulse_trains.size == 0
-        or pulse_trains.ndim != 2
-        or pulse_trains.shape[0] != len(distimes)
-        or pulse_trains.shape[1] != total_samples
-    ):
-        pulse_trains = build_pulse_trains_from_distimes(distimes, total_samples)
-
-    mu_uids_raw = payload.mu_uids
-    mu_uids: list[str] = (
-        list(mu_uids_raw)
-        if isinstance(mu_uids_raw, (list, tuple)) and len(mu_uids_raw) == len(distimes)
-        else _generate_mu_uids(mu_grid_index)
+    kept, entries = _kept_mus(req, parameters)
+    mu_uids = [req.mu_uids[i] for i in kept]
+    history = [*req.history, *entries]
+    artifacts = [
+        req.artifact_times[i] if i < len(req.artifact_times) else spike_array([]) for i in kept
+    ]
+    sil = [req.sil[i] for i in kept] if req.sil is not None else []
+    loader_meta = form_over_loader_meta(
+        req.signal.loader_meta if req.signal is not None else {}, form.model_dump()
     )
-    edit_history: list[dict[str, Any]] = list(payload.edit_history or [])
-    artifact_times_raw = payload.artifact_times or []
-    # Pad to len(distimes) so keep_idx/kept_idx index safely.
-    artifact_times_all: list[list[int]] = [list(row) for row in artifact_times_raw]
-    if len(artifact_times_all) < len(distimes):
-        artifact_times_all.extend([[] for _ in range(len(distimes) - len(artifact_times_all))])
 
-    # Schema declares these as bool | None; default to True when unspecified.
-    remove_flagged = True if payload.remove_flagged is None else payload.remove_flagged
-    remove_duplicates = True if payload.remove_duplicates is None else payload.remove_duplicates
-
-    # Indices into the payload's MUs that survive the save, in saved order.
-    kept_mus = list(range(len(distimes)))
-
-    if remove_flagged and distimes:
-        flagged = _normalize_flagged(payload.flagged, len(distimes))
-        keep_idx = [i for i, spikes in enumerate(distimes) if not flagged[i]]
-        removed_uids = [mu_uids[i] for i in range(len(distimes)) if flagged[i]]
-        distimes = [distimes[i] for i in keep_idx]
-        mu_grid_index = [mu_grid_index[i] for i in keep_idx]
-        mu_uids = [mu_uids[i] for i in keep_idx]
-        pulse_trains = pulse_trains[keep_idx, :] if pulse_trains.size else pulse_trains
-        artifact_times_all = [artifact_times_all[i] for i in keep_idx]
-        kept_mus = [kept_mus[i] for i in keep_idx]
-        if removed_uids:
-            edit_history.append(_save_removal_entry("remove_flagged", removed_uids))
-
-    if remove_duplicates and len(distimes) > 1 and fsamp and fsamp > 0:
-        kept_idx = _dedup(distimes, mu_grid_index, parameters, fsamp, total_samples)
-        kept_set = set(kept_idx)
-        removed_uids = [uid for i, uid in enumerate(mu_uids) if i not in kept_set]
-        pulse_trains = pulse_trains[kept_idx, :] if kept_idx else np.zeros((0, total_samples))
-        distimes = [_clean_distimes(distimes[i]) for i in kept_idx]
-        mu_grid_index = [mu_grid_index[i] for i in kept_idx]
-        mu_uids = [mu_uids[i] for i in kept_idx]
-        artifact_times_all = [artifact_times_all[i] for i in kept_idx]
-        kept_mus = [kept_mus[i] for i in kept_idx]
-        if removed_uids:
-            edit_history.append(_save_removal_entry("remove_duplicates", removed_uids))
-
-    bids_root = resolve_bids_root(payload.project)
-    file_label = payload.file_label or ""
-    entity_label = payload.entity_label or parse_entity_label(file_label)
-    subject, session = _parse_subject_session_from_entity_label(entity_label)
-    decomp_dir = bids_root / "derivatives" / "muedit" / f"sub-{subject}"
-    if session:
-        decomp_dir = decomp_dir / f"ses-{session}"
-    decomp_dir = decomp_dir / "decomp"
-    decomp_dir.mkdir(parents=True, exist_ok=True)
-    out_path = decomp_dir / f"{entity_label}_edited.npz"
-
-    regions: list[tuple[int, int]] = []
-    for row in payload.artifact_regions or []:
-        pair: tuple[Any, Any] | None = None
-        if isinstance(row, (list, tuple)) and len(row) == 2:
-            pair = (row[0], row[1])
-        elif isinstance(row, dict) and "start" in row and "end" in row:
-            pair = (row["start"], row["end"])
-        if pair is None:
-            continue
-        try:
-            regions.append((int(pair[0]), int(pair[1])))
-        except (TypeError, ValueError):
-            continue
-    artifact_mask = build_manual_artifact_mask(regions, total_samples)
-    if artifact_mask is None:
-        ctx_for_mask = _get_edit_signal_context(
-            payload.edit_signal_token
-        ) or _get_edit_signal_context_by_label(file_label)
-        if ctx_for_mask is not None:
-            cached_mask = ctx_for_mask.artifact_mask
-            if cached_mask is not None and cached_mask.size == total_samples:
-                artifact_mask = cached_mask
-
-    save_decomposition_npz(
+    bids_root, entity_label, out_path = _save_target(req)
+    _write_decomposition(
+        req,
         out_path,
-        pulse_trains=pulse_trains,
-        distimes=distimes,
-        fsamp=fsamp,
-        grid_names=grid_names,
-        mu_grid_index=mu_grid_index,
-        muscles=muscle_names,
-        parameters=parameters,
-        total_samples=total_samples,
-        extras={"artifact_mask": artifact_mask} if artifact_mask is not None else None,
-    )
-    save_editlog(out_path.with_suffix(".json"), mu_uids, edit_history, artifact_times_all or None)
-
-    participant_meta = payload.participant_meta or {}
-    try:
-        write_bids_dataset_description(
-            bids_root,
-            subject=subject,
-            age=int(participant_meta["age"])
-            if participant_meta.get("age") not in (None, "", "n/a")
-            else None,
-            sex=participant_meta.get("sex") or None,
-            handedness=participant_meta.get("handedness") or None,
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("Failed to write participants.tsv", exc_info=True)
-
-    deriv_paths: dict[str, str] | None = None
-    if distimes and fsamp and fsamp > 0:
-        try:
-            deriv_result = export_bids_mu_derivatives(
-                distimes=distimes,
-                fsamp=fsamp,
-                bids_root=bids_root,
-                entities=entity_label,
-                mu_uids=mu_uids,
-            )
-            deriv_paths = {k: str(v) for k, v in deriv_result.items()}
-        except Exception:  # noqa: BLE001, S110
-            pass  # derivatives export is best-effort; never block the primary save
-
-    bids_paths = _export_bids_from_mat_context(
-        bids_root=bids_root,  # already a Path
-        entity_label=entity_label,
-        edit_signal_token=payload.edit_signal_token,
-        file_label=file_label,
-        fsamp=fsamp,
+        kept,
+        {"mu_uids": mu_uids, "history": history, "artifact_times": artifacts},
         grid_names=grid_names,
         muscle_names=muscle_names,
         parameters=parameters,
-        powerline_freq=float(payload.powerline_freq) if payload.powerline_freq else None,
-        manufacturer=payload.manufacturer or None,
-        manufacturers_model_name=payload.manufacturers_model_name or None,
-        placement_scheme=payload.placement_scheme or None,
-        placement_scheme_description=payload.placement_scheme_description or None,
-        task_description=payload.task_description or None,
-        software_versions=payload.software_versions or None,
+        sil=sil if sil and all(s is not None for s in sil) else None,
+        loader_meta=loader_meta or None,
     )
+
+    warnings: list[str] = []
+    participant = form.participant_meta.model_dump() if form.participant_meta else None
+    try:
+        write_participant(bids_root, BidsEntities.parse(entity_label).subject, participant)
+    except (OSError, ValueError, csv.Error):
+        logger.warning("Failed to write participants.tsv", exc_info=True)
+        warnings.append("participants.tsv was not updated; see the server log.")
+    # Before the derivatives: their unit groups are read from the raw channels.tsv.
+    bids_paths, bids_error = _export_bids_emg(
+        req, bids_root, entity_label, grid_names, muscle_names, loader_meta, warnings
+    )
+    deriv_paths = _export_mu_derivatives(req, kept, bids_root, entity_label, warnings)
     result: dict[str, Any] = {
         "saved": True,
         "path": str(out_path),
-        "kept_indices": kept_mus,
+        "kept_indices": kept,
         "mu_uids": mu_uids,
-        "edit_history": edit_history,
+        "edit_history": history,
     }
     if bids_paths:
         result["bids_emg_paths"] = bids_paths
+    if bids_error:
+        result["bids_emg_error"] = bids_error
     if deriv_paths:
         result["bids_deriv_paths"] = deriv_paths
-    return make_json_safe(result)
+    if warnings:
+        result["bids_warnings"] = warnings
+    return result, kept, entries
 
 
-def update_filter(payload: EditFilterPayload) -> dict[str, Any]:
-    bids_root = resolve_bids_root(payload.project)
-    edit_signal_token = payload.edit_signal_token
-    file_label = payload.file_label or ""
-    entity_label = payload.entity_label or parse_entity_label(file_label)
-    grid_index = payload.grid_index
-    distimes = normalize_distimes(payload.distimes or [])
-    if not distimes:
-        raise HTTPException(status_code=400, detail="distimes are required for filter update")
-
-    mu_index = payload.mu_index
-    if mu_index < 0 or mu_index >= len(distimes):
-        raise HTTPException(status_code=400, detail="mu_index out of range")
-    mu_grid_index = _normalize_mu_grid_index(payload.mu_grid_index, len(distimes))
-    peeloff_win = payload.peel_off_win
-    if peeloff_win <= 0:
-        peeloff_win = DEFAULT_PEEL_OFF_WIN_SEC
-    use_peeloff = payload.use_peeloff
-    flagged = _normalize_flagged(payload.flagged, len(distimes))
-
-    view_start = payload.view_start
-    view_end = payload.view_end
-    if view_end <= view_start:
-        raise HTTPException(status_code=400, detail="view_start/view_end are required")
-    nbextchan = payload.nbextchan
-
-    emg: np.ndarray | None = None
-    fsamp: float | None = None
-    emg_mask: np.ndarray | None = None
-    emg_is_presliced = False  # True only when BIDS loaded a view-length slice
-
-    try:
-        emg, fsamp, emg_mask = _load_bids_grid(
-            bids_root, str(entity_label), grid_index, view_start, view_end
-        )
-        emg_is_presliced = True
-    except (ValueError, FileNotFoundError):
-        emg, fsamp, emg_mask = None, None, None
-
-    if emg is None or fsamp is None or emg_mask is None:
-        ctx = _get_edit_signal_context(edit_signal_token)
-        if ctx is None:
-            ctx = _get_edit_signal_context_by_label(file_label)
-        if ctx is None:
-            raise HTTPException(
-                status_code=400,
-                detail="No BIDS EMG available. Reload decomposition MAT and retry filter update.",
-            )
-        data = np.asarray(ctx.data, dtype=float)
-        if data.size == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="No BIDS EMG available. Reload decomposition MAT and retry filter update.",
-            )
-        if data.ndim == 1:
-            data = data.reshape(1, -1)
-        if data.ndim != 2:
-            raise HTTPException(status_code=400, detail="Invalid cached EMG context")
-        if data.shape[0] > data.shape[1]:
-            data = data.T
-        fsamp_val = ctx.fsamp
-        if fsamp_val <= 0:
-            raise HTTPException(status_code=400, detail="Missing fsamp in MAT signal context")
-        grid_names = ctx.grid_names or ["Grid 1"]
-        coordinates, _, _, _ = format_hdemg_signal(grid_names)
-        if grid_index < 0 or grid_index >= len(coordinates):
-            raise HTTPException(status_code=400, detail="grid_index out of range")
-        ch_offset = 0
-        for g in range(grid_index):
-            ch_offset += int(coordinates[g].shape[0])
-        n_ch = int(coordinates[grid_index].shape[0])
-        emg = data[ch_offset : ch_offset + n_ch, :]
-        fsamp = fsamp_val
-
-        raw_masks = ctx.emgmask
-        cell = raw_masks[grid_index] if grid_index < len(raw_masks) else np.array([], dtype=int)
-        cell_arr = np.asarray(cell, dtype=int).flatten()
-        if cell_arr.size == n_ch and np.all(np.isin(cell_arr, [0, 1])):
-            emg_mask = cell_arr.copy()
-        else:
-            emg_mask = np.zeros(n_ch, dtype=int)
-            if cell_arr.size > 0:
-                max_val = int(np.max(cell_arr))
-                min_val = int(np.min(cell_arr))
-                if min_val >= 1 and max_val <= n_ch:
-                    idx = cell_arr[cell_arr >= 1] - 1
-                    emg_mask[idx.astype(int)] = 1
-                elif min_val >= 0 and max_val < n_ch:
-                    idx = cell_arr[cell_arr >= 0]
-                    emg_mask[idx.astype(int)] = 1
-                elif cell_arr.size == n_ch:
-                    emg_mask = np.asarray(cell_arr != 0, dtype=int)
-
-    artifact_times_raw = payload.artifact_times or []
-    artifact_times = list(artifact_times_raw)
-
-    artifact_mask: np.ndarray | None = None
-    ctx_for_mask = _get_edit_signal_context(edit_signal_token) or _get_edit_signal_context_by_label(
-        file_label
-    )
-    if ctx_for_mask is not None:
-        artifact_mask = ctx_for_mask.artifact_mask
-
-    bids_emg_offset = view_start if emg_is_presliced else 0
-    if view_start - bids_emg_offset < 0 or view_end - bids_emg_offset > emg.shape[1]:
-        raise HTTPException(
-            status_code=400,
-            detail="view window exceeds available EMG samples",
-        )
-    lock_spikes = payload.lock_spikes
-    pt, updated = update_motor_unit_filter_window(
-        emg,
-        emg_mask,
-        distimes[mu_index],
-        fsamp,
-        view_start,
-        view_end,
-        nbextchan=nbextchan,
-        peeloff_spike_times=[
-            distimes[i]
-            for i in range(len(distimes))
-            if i != mu_index and mu_grid_index[i] == grid_index and not flagged[i]
-        ],
-        peeloff_win=peeloff_win,
-        emg_offset=bids_emg_offset,
-        use_peeloff=use_peeloff,
-        artifact_times=artifact_times or None,
-        lock_spikes=lock_spikes,
-        artifact_mask=artifact_mask,
-    )
-
-    pulse_train = payload.pulse_train
-    updated_pulse = None
-    if pulse_train is not None:
-        try:
-            pulse_arr = np.array(pulse_train, dtype=float)
-        except (TypeError, ValueError):
-            pulse_arr = None
-        if pulse_arr is not None and pt is not None:
-            edge = int(round(0.1 * fsamp))
-            seg_start = view_start + edge
-            seg_end = min(view_start + len(pt) - edge, pulse_arr.shape[0])
-            if seg_end > seg_start and len(pt) > 2 * edge:
-                pulse_arr[seg_start:seg_end] = pt[edge : edge + (seg_end - seg_start)]
-            updated_pulse = pulse_arr
-
-    return make_json_safe(
-        {
-            "fsamp": fsamp,
-            "distimes": updated,
-            "pulse_train": (
-                updated_pulse.tolist() if isinstance(updated_pulse, np.ndarray) else pulse_train
+def save_edit_session(
+    payload: EditSessionSavePayload, session: str = DEFAULT_SESSION
+) -> dict[str, Any]:
+    """Save an edit session; the saved file becomes the session's baseline."""
+    edit = _require_session(payload.token, session)
+    with edit.lock:
+        _check_open(edit)
+        if edit.fsamp <= 0:
+            raise MueditError("fsamp is required to save edits")
+        meta = edit.meta
+        signal = edit.signal
+        mask = signal.artifact_mask if signal is not None else None
+        bids_root = _dataset_root(edit, payload.project)
+        req = _SaveRequest(
+            spike_times=edit.spike_times,
+            flagged=edit.flagged,
+            mu_grid_index=edit.mu_grid_index,
+            mu_uids=edit.mu_uids,
+            history=edit.history,
+            artifact_times=edit.artifact_times,
+            fsamp=edit.fsamp,
+            total_samples=edit.total_samples,
+            grid_names=list(meta.get("grid_names") or []),
+            parameters=dict(meta.get("parameters") or {}),
+            form=payload.model_copy(
+                update={"file_label": payload.file_label or meta.get("file_label")}
             ),
-        }
-    )
-
-
-def add_spikes(payload: EditRoiPayload) -> dict[str, Any]:
-    """Add spikes in ROI for selected motor unit."""
-    pulse_train = payload.pulse_train
-    if pulse_train is None:
-        raise HTTPException(status_code=400, detail="pulse_train is required")
-    distimes = normalize_distimes(payload.distimes or [])
-    fsamp = payload.fsamp or 0.0
-    if fsamp <= 0:
-        raise HTTPException(status_code=400, detail="fsamp is required")
-    x_start = payload.x_start
-    x_end = payload.x_end
-    y_min = payload.y_min if payload.y_min is not None else float("inf")
-    mu_index = payload.mu_index
-    if mu_index < 0 or mu_index >= len(distimes):
-        raise HTTPException(status_code=400, detail="mu_index out of range")
-
-    pulse = np.array(pulse_train, dtype=float)
-    updated = add_spikes_in_roi(pulse, distimes[mu_index], fsamp, x_start, x_end, y_min)
-    return make_json_safe({"distimes": updated})
-
-
-def add_artifact(payload: EditRoiPayload) -> dict[str, Any]:
-    """Mark a peak in the ROI as an artifact for the selected motor unit."""
-    pulse_train = payload.pulse_train
-    if pulse_train is None:
-        raise HTTPException(status_code=400, detail="pulse_train is required")
-    fsamp = payload.fsamp or 0.0
-    if fsamp <= 0:
-        raise HTTPException(status_code=400, detail="fsamp is required")
-    x_start = payload.x_start
-    x_end = payload.x_end
-    y_min = payload.y_min if payload.y_min is not None else float("inf")
-
-    artifact_times_raw = payload.artifact_times or []
-    artifact_times = list(artifact_times_raw)
-
-    pulse = np.array(pulse_train, dtype=float)
-    updated = add_artifact_in_roi(pulse, artifact_times, fsamp, x_start, x_end, y_min)
-    return make_json_safe({"artifact_times": updated})
-
-
-def delete_spikes(payload: EditRoiPayload) -> dict[str, Any]:
-    """Delete spikes and artifacts in ROI for selected motor unit."""
-    pulse_train = payload.pulse_train
-    if pulse_train is None:
-        raise HTTPException(status_code=400, detail="pulse_train is required")
-    distimes = normalize_distimes(payload.distimes or [])
-    x_start = payload.x_start
-    x_end = payload.x_end
-    y_min = payload.y_min or 0.0
-    y_max = payload.y_max or 0.0
-    mu_index = payload.mu_index
-    if mu_index < 0 or mu_index >= len(distimes):
-        raise HTTPException(status_code=400, detail="mu_index out of range")
-
-    pulse = np.array(pulse_train, dtype=float)
-    updated_distimes = delete_spikes_in_roi(pulse, distimes[mu_index], x_start, x_end, y_min, y_max)
-
-    # Also delete artifacts in the same ROI
-    updated_artifact_times = None
-    artifact_times_raw = payload.artifact_times
-    if artifact_times_raw:
-        artifact_times = list(artifact_times_raw)
-        if artifact_times:
-            updated_artifact_times = delete_artifacts_in_roi(
-                pulse, artifact_times, x_start, x_end, y_min, y_max
-            )
-
-    result = {"distimes": updated_distimes}
-    if updated_artifact_times is not None:
-        result["artifact_times"] = updated_artifact_times
+            pulse_trains=edit.pulse_rows,
+            muscle_names=list(meta.get("muscle_names") or []),
+            sil=[edit.sil_by_uid.get(uid) for uid in edit.mu_uids],
+            rois=list(meta.get("rois") or []) or None,
+            artifact_mask=mask if mask is not None and mask.size == edit.total_samples else None,
+            signal=signal,
+            bids_root=bids_root,
+            subject=_file_subject(meta.get("file_label")) if bids_root == edit.bids_root else None,
+            # Windows cannot replace a file that is memory-mapped.
+            before_write=(lambda path: edit.detach(str(path))) if sys.platform == "win32" else None,
+        )
+        result, kept, entries = _save(req)
+        edit.saved(kept, entries)
+        # The saved file is the session's file from now on.
+        meta.update(file_label=Path(result["path"]).name, source_path=result["path"])
+        result.update(_history_tail(edit))
+        if edit.log is not None:
+            edit.log.close(keep=False)
+        # Keyed to the saved file: reopening it is what offers these edits back after a crash.
+        edit.log = EditLog.create(result["path"], payload.token)
+        result.update(_per_mu(edit))
+    resize_edit_session(payload.token)
     return make_json_safe(result)
 
 
-def delete_dr(payload: EditRoiPayload) -> dict[str, Any]:
-    """Delete spikes with high discharge rates inside ROI for selected MU."""
-    pulse_train = payload.pulse_train
-    if pulse_train is None:
-        raise HTTPException(status_code=400, detail="pulse_train is required")
-    distimes = normalize_distimes(payload.distimes or [])
-    fsamp = payload.fsamp or 0.0
-    if fsamp <= 0:
-        raise HTTPException(status_code=400, detail="fsamp is required")
-    x_start = payload.x_start
-    x_end = payload.x_end
-    y_min = payload.y_min if payload.y_min is not None else float("inf")
-    mu_index = payload.mu_index
-    if mu_index < 0 or mu_index >= len(distimes):
-        raise HTTPException(status_code=400, detail="mu_index out of range")
+def save_edits(payload: EditSavePayload) -> dict[str, Any]:
+    """Save a run: discharge times from the request, else from the stored run, and its pulse trains."""
+    with held_run_result(payload.run_result_token) as run:
+        if run is None:
+            raise MueditError(
+                "The run's results are no longer on the server; run the decomposition again",
+                "run_result_token",
+            )
+        spike_times = list(run.spike_times)
+        pulse_rows = run.pulse_trains
+        # Otherwise the loader draws them from the discharge times.
+        fits = pulse_rows.size and pulse_rows.shape == (len(spike_times), payload.total_samples)
+        matrix = pulse_rows if fits else None
 
-    pulse = np.array(pulse_train, dtype=float)
-    updated = delete_high_discharge_rate_spikes_in_roi(
-        pulse, distimes[mu_index], fsamp, x_start, x_end, y_min
-    )
-    return make_json_safe({"distimes": updated})
+        def pulse_trains(kept: list[int]) -> FloatArray | RowSource | None:
+            if matrix is None or len(kept) == matrix.shape[0]:
+                return matrix
+            # Read as the file is written, not indexed into a heap copy of the kept rows.
+            return RowSource((len(kept), matrix.shape[1]), lambda a, b: matrix[kept[a:b]])
 
+        n_mu = len(spike_times)
+        mu_grid_index = list(payload.mu_grid_index or [])[:n_mu]
+        mu_grid_index += [0] * (n_mu - len(mu_grid_index))
+        regions = [(r.start, r.end) for r in payload.artifact_regions or []]
+        extras = run.extras
+        sil = extras.sil if len(extras.sil) == len(spike_times) else None
 
-def remove_outliers(payload: EditOutliersPayload) -> dict[str, Any]:
-    """Remove discharge-rate outlier spikes and return removal count."""
-    pulse_train = payload.pulse_train
-    if pulse_train is None:
-        raise HTTPException(status_code=400, detail="pulse_train is required")
-    distimes = normalize_distimes(payload.distimes or [])
-    fsamp = payload.fsamp or 0.0
-    if fsamp <= 0:
-        raise HTTPException(status_code=400, detail="fsamp is required")
-    mu_index = payload.mu_index
-    if mu_index < 0 or mu_index >= len(distimes):
-        raise HTTPException(status_code=400, detail="mu_index out of range")
-
-    pulse = np.array(pulse_train, dtype=float)
-    source = sorted({int(x) for x in distimes[mu_index]})
-    updated = remove_discharge_rate_outliers(pulse, source, fsamp)
-    removed = max(0, len(source) - len(updated))
-    return make_json_safe({"distimes": updated, "removed_count": removed})
-
-
-def remove_duplicates_service(payload: EditDeduplicatePayload) -> dict[str, Any]:
-    """Remove duplicate motor units using lag-aware spike-train overlap."""
-    distimes = normalize_distimes(payload.distimes or [])
-    if not distimes:
-        return make_json_safe({"kept_indices": [], "distimes": []})
-
-    fsamp = payload.fsamp
-    if not fsamp or fsamp <= 0:
-        raise HTTPException(status_code=400, detail="fsamp is required for deduplication")
-
-    total_samples = payload.total_samples
-    if total_samples <= 0:
-        total_samples = max((max(d) for d in distimes if d), default=0) + 1
-    parameters = payload.parameters or {}
-
-    if len(distimes) <= 1:
-        return make_json_safe(
-            {
-                "kept_indices": list(range(len(distimes))),
-                "distimes": distimes,
-            }
+        req = _SaveRequest(
+            spike_times=spike_times,
+            flagged=[False] * len(spike_times),
+            mu_grid_index=mu_grid_index,
+            mu_uids=initial_mu_uids(mu_grid_index),
+            history=[],
+            artifact_times=[],
+            fsamp=payload.fsamp,
+            total_samples=payload.total_samples,
+            grid_names=list(payload.grid_names or []),
+            parameters=dict(payload.parameters or {}),
+            form=payload,
+            pulse_trains=pulse_trains,
+            sil=list(sil) if sil is not None else None,
+            rois=extras.rois,
+            target_segments=extras.target_segments,
+            artifact_mask=build_manual_artifact_mask(regions, payload.total_samples),
         )
-
-    mu_grid_index = _normalize_mu_grid_index(payload.mu_grid_index, len(distimes))
-    kept_idx = _dedup(distimes, mu_grid_index, parameters, fsamp, total_samples)
-    return make_json_safe(
-        {
-            "kept_indices": kept_idx,
-            "distimes": [_clean_distimes(distimes[i]) for i in kept_idx],
-            "removed_count": len(distimes) - len(kept_idx),
-        }
-    )
-
-
-def flag_mu(payload: EditFlagPayload) -> dict[str, Any]:
-    """Validate MU index and return the requested flag status without mutating spike times."""
-    distimes = normalize_distimes(payload.distimes or [])
-    mu_index = payload.mu_index
-    if mu_index < 0 or mu_index >= len(distimes):
-        raise HTTPException(status_code=400, detail="mu_index out of range")
-    flagged = True if payload.flag is None else bool(payload.flag)
-    return make_json_safe({"flagged": flagged})
+        result, _, _ = _save(req)
+        return make_json_safe(result)

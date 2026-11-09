@@ -14,10 +14,12 @@ import numpy as np
 import pytest
 
 from muedit.decomp.core import decompose_step
+from muedit.decomp.decomposition_file import unpack_csr
 from muedit.decomp.postprocess import postprocess_step
 from muedit.decomp.preprocess import load_step, preprocess_step
 from muedit.decomp.types import POSTPROCESS_MODES, DecompositionParameters
 from muedit.models import SignalImport
+from muedit.signal.decomp_primitives import POSTPROC_MIN_ISI_SEC
 from tests._metrics_helpers import (
     Match,
     active_reference_count,
@@ -120,6 +122,13 @@ def _mask_regions(mask: np.ndarray) -> list[tuple[int, int]]:
     ]
 
 
+def _parameters(decomp: Any) -> dict[str, Any]:
+    """The run's parameters: JSON text in schema v2, a pickled dict in older saves."""
+    raw = decomp["parameters"]
+    value = raw.item() if raw.shape == () else raw
+    return json.loads(value) if isinstance(value, str) else value
+
+
 def _prepare(
     path: str,
     signal: SignalImport,
@@ -132,13 +141,9 @@ def _prepare(
         loaded=loaded,
         duration=None,
         manual_roi=False,
-        roi=roi,
-        rois=None,
+        rois=[roi],
         params=params,
         discard_overrides=None,
-        bids_root=None,
-        bids_entities=None,
-        bids_metadata=None,
         artifact_regions=artifact_regions,
     )
 
@@ -149,7 +154,7 @@ def _run_branches(
     dataset: str,
     compare: Any,
 ) -> dict[str, dict[str, Any]]:
-    """Decompose once, then time and score each postprocess branch."""
+    """Decompose once, then time and score each postprocess branch (with its ``spike_times``)."""
     rng = np.random.default_rng(base.random_seed)
     t0 = time.perf_counter()
     decomposed = decompose_step(prep=prep, params=base, rng=rng, progress_cb=None)
@@ -162,8 +167,8 @@ def _run_branches(
         post = postprocess_step(prep=prep, decomposed=decomposed, params=params, progress_cb=None)
         post_sec = round(time.perf_counter() - t0, 3)
 
-        distime = [np.asarray(d) for d in post.distime]
-        matches, n_units, n_ref = compare(label, distime)
+        spike_times = [np.asarray(d) for d in post.spike_times]
+        matches, n_units, n_ref = compare(label, spike_times)
         results = _summarize(matches, n_units, n_ref)
         results.update(
             postprocess_mode=label, duration_sec=post_sec, decompose_duration_sec=decompose_sec
@@ -171,7 +176,7 @@ def _run_branches(
 
         name = dataset if label == "windowed" else f"{dataset}_{label}"
         _log_result(name, params, results)
-        out[label] = results
+        out[label] = {**results, "spike_times": spike_times}
     return out
 
 
@@ -185,13 +190,24 @@ def real_reference() -> dict[str, Any]:
     # it, and the full-signal branches need the same mask to stay comparable.
     edited = np.load(str(require_sample(_EDITED_NPZ)), allow_pickle=True)
     decomp = np.load(str(require_sample(_DECOMP_NPZ)), allow_pickle=True)
+    # Schema v2 saves spikes CSR-packed; older saves keep the per-MU lists.
+    reference = (
+        unpack_csr(edited["spike_times"], edited["spike_offsets"])
+        if "spike_times" in edited.files
+        else edited["discharge_times"]
+    )
+    artifact = (
+        [(int(a), int(b)) for a, b in decomp["artifact_intervals"]]
+        if "artifact_intervals" in decomp.files
+        else _mask_regions(decomp["artifact_mask"])
+        if "artifact_mask" in decomp.files
+        else None
+    )
     return {
-        "discharge_times": [np.asarray(x) for x in edited["discharge_times"]],
+        "spike_times": [np.asarray(x) for x in reference],
         "roi": tuple(int(x) for x in decomp["rois"][0]),
-        "params": decomp["parameters"].item(),
-        "artifact_regions": (
-            _mask_regions(decomp["artifact_mask"]) if "artifact_mask" in decomp.files else None
-        ),
+        "params": _parameters(decomp),
+        "artifact_regions": artifact,
     }
 
 
@@ -215,11 +231,11 @@ def real_benchmark(
     prep = _prepare(
         str(novecento_otb4_file), novecento_emg, roi, base, real_reference["artifact_regions"]
     )
-    ref_full = real_reference["discharge_times"]
+    ref_full = real_reference["spike_times"]
 
-    def compare(label: str, distime: list[np.ndarray]) -> Any:
+    def compare(label: str, spike_times: list[np.ndarray]) -> Any:
         ref = filter_to_roi(ref_full, roi) if label == "windowed" else ref_full
-        det = filter_to_roi(distime, roi) if label == "windowed" else distime
+        det = filter_to_roi(spike_times, roi) if label == "windowed" else spike_times
         active = [i for i, d in enumerate(ref) if d.size >= 2]
         candidates = score_pairs(
             det, ref, jitter=_REAL_JITTER, max_lag=_REAL_MAX_LAG, ref_indices=active
@@ -244,11 +260,11 @@ def sim_benchmarks(
 
         def compare(
             _label: str,
-            distime: list[np.ndarray],
+            spike_times: list[np.ndarray],
             gt_in_roi: list[np.ndarray] = gt_in_roi,
             n_ref: int = n_ref,
         ) -> Any:
-            det = filter_to_roi(distime, _SIM_ROI)
+            det = filter_to_roi(spike_times, _SIM_ROI)
             candidates = score_pairs(det, gt_in_roi, jitter=_JITTER, max_lag=_MAX_LAG)
             return greedy_one_to_one(candidates, _ROA_THRESHOLD), len(det), n_ref
 
@@ -272,10 +288,16 @@ def test_real_units_match_edited_reference(real_benchmark: dict[str, dict[str, A
 
 @pytest.mark.parametrize("pct", [20, 40, 60])
 def test_sim_matches_ground_truth(
-    sim_benchmarks: dict[int, dict[str, dict[str, Any]]], pct: int
+    sim_benchmarks: dict[int, dict[str, dict[str, Any]]],
+    simulation_loaded: dict[int, dict[str, Any]],
+    pct: int,
 ) -> None:
-    """The windowed branch reaches a mean RoA of 0.9; the others match something."""
+    """The windowed branch finds 5+ valid units at a mean RoA of 0.9; the others match something."""
     r = sim_benchmarks[pct]["windowed"]
+    assert r["n_units"] >= 5, f"{pct}%: expected >= 5 MUs, got {r['n_units']}"
+    refractory = int(np.round(simulation_loaded[pct]["fsamp"] * POSTPROC_MIN_ISI_SEC))
+    for i, d in enumerate(r["spike_times"]):
+        assert np.all(np.diff(d) >= refractory), f"{pct}% MU {i}: unsorted or refractory violated"
     assert r["n_matched"] > 0, f"{pct}%: no GT matches"
     assert r["mean_roa"] >= _ROA_THRESHOLD, f"{pct}%: mean RoA {r['mean_roa']:.3f}"
     # The full-signal branches adapt online and can land lower; the benchmark

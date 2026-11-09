@@ -1,0 +1,397 @@
+"""tracemalloc peak per app stage on a mid-size synthetic recording, against a scaled budget."""
+
+from __future__ import annotations
+
+import gc
+import tracemalloc
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pytest
+import scipy.io
+
+from muedit.api.schemas import FilterUpdatePayload, QcAutoPayload
+from muedit.api.services import editing_service, preview_service
+from muedit.api.services.series_service import series_frame
+from muedit.decomp.core import decompose_step
+from muedit.decomp.pipeline import run_decomposition
+from muedit.decomp.postprocess import export_step, postprocess_step
+from muedit.decomp.preprocess import load_step, preprocess_step
+from muedit.decomp.types import DEFAULT_NBEXTCHAN, DecompositionParameters
+from muedit.io.bids import export_bids_emg
+from muedit.io.factory import load_signal
+from muedit.storage import SessionStore
+from tests._report import record
+from tests._synthetic_emg import FSAMP, N_CHANNELS, motor_unit_emg
+
+# ── Mid-size scale ────────────────────────────────────────────────────────────
+
+#: 60 s @ 2000 Hz, one 64-channel grid.  Big enough that every stage holds a
+#: real working set (the extended window alone is ~0.5 GB), small enough for a
+#: CI runner.
+N_SAMPLES = 120_000
+#: Central 30-s decomposition ROI.
+ROI = (30_000, 90_000)
+#: FastICA iterations: enough to populate filters for every postprocess branch.
+NITER = 10
+GRID_NAME = "GR08MM1305"
+
+EXT_FACTOR = round(DEFAULT_NBEXTCHAN / N_CHANNELS)  # 16, as in the app default
+EXT_ROWS = N_CHANNELS * EXT_FACTOR  # extended rows per window/full trace
+ROI_SAMPLES = ROI[1] - ROI[0]
+
+RAW_MB = N_CHANNELS * N_SAMPLES * 8 / 1e6
+EXT_WINDOW_MB = EXT_ROWS * ROI_SAMPLES * 8 / 1e6
+
+# ── Per-stage budgets (latest baseline x 1.25) ────────────────────────────────
+#
+# Each budget is ``factor x working-set MB`` where the working set is the
+# smallest full-size array the stage must materialise.  The factors are the
+# tracemalloc baseline on this input plus 25% headroom; re-measure when a change
+# lowers them. A factor that grows means the stage started keeping an
+# extra full copy.  ``load`` reads a v5 .mat, which scipy can only read whole
+# (test_io_factory checks that sliced loads into a store hold no full copy). Loaded, filtered and pulse arrays are memory-mapped in session stores, and
+# edit_load opens a server-side edit session that holds little more than the
+# float32 pulse frame. Full-trace and adaptive stream the recording: full-trace
+# holds one ~64 MB batch, adaptive one calibration chunk; their pulse trains are
+# in the run store. ``series`` reads the min/max pyramids, so it depends on the
+# bins asked for, not on the recording: its budget is in MB. So does
+# ``bids_export``, which reads one ``BLOCK_BYTES`` block of data records at a time.
+# ``RAW_MB`` and ``EXT_WINDOW_MB`` are float64 sizes; the float32 compute working
+# sets are half of them.
+
+BUDGETS_MB: dict[str, float] = {
+    "load": 1.9 * RAW_MB,
+    "preview": 0.65 * RAW_MB,
+    "series": 2.0,
+    "qc_auto": 3.2 * RAW_MB,
+    "preprocess": 0.75 * RAW_MB,  # with the filter threads' rows (FILTER_WORK_BYTES)
+    "decompose": 0.89 * EXT_WINDOW_MB,
+    "post_windowed": 0.84 * EXT_WINDOW_MB,
+    "save": 0.29 * RAW_MB,
+    "bids_export": 43.0,
+    "post_full": 1.5 * RAW_MB,
+    "post_adaptive": 2.05 * RAW_MB,
+    "edit_load": 0.005 * RAW_MB,
+    "update_filter": 3.9 * RAW_MB,
+}
+
+
+# ── Measurement helpers ───────────────────────────────────────────────────────
+
+
+def _peak_mb(fn: Callable[[], Any]) -> tuple[Any, float]:
+    """Run ``fn`` under tracemalloc and return ``(result, peak traced MB)``."""
+    gc.collect()
+    tracemalloc.start()
+    try:
+        out = fn()
+    finally:
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+    return out, peak / 1e6
+
+
+def _check(stage: str, peak_mb: float) -> None:
+    budget_mb = BUDGETS_MB[stage]
+    record(
+        "memory",
+        caption=(
+            "tracemalloc peak per stage, mid-size synthetic "
+            f"({N_CHANNELS} ch x {N_SAMPLES} samples, ROI {ROI_SAMPLES})"
+        ),
+        stage=stage,
+        peak_mb=round(peak_mb, 1),
+        budget_mb=round(budget_mb, 1),
+        headroom=round(budget_mb - peak_mb, 1),
+    )
+    assert peak_mb <= budget_mb, (
+        f"{stage}: tracemalloc peak {peak_mb:.1f} MB exceeds budget "
+        f"{budget_mb:.1f} MB (a new full copy in this stage?)"
+    )
+
+
+# ── Fixtures ─────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="session")
+def mat_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The synthetic recording on disk, as a loader-readable ``.mat``."""
+    path = tmp_path_factory.mktemp("memory_regression") / "mid_size.mat"
+    scipy.io.savemat(
+        str(path),
+        {
+            "signal": {
+                "data": motor_unit_emg(seed=7, n_samples=N_SAMPLES, fsamp=FSAMP, activity=ROI),
+                "fsamp": FSAMP,
+                "gridname": [GRID_NAME],
+                "muscle": ["ta"],
+                "auxiliary": np.zeros((0, N_SAMPLES)),
+                "auxiliaryname": [],
+            }
+        },
+        do_compression=False,
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
+def run_store() -> SessionStore:
+    """The T1 folder a decompose run writes its filtered EMG and pulse trains into."""
+    return SessionStore.create("memory-regression")
+
+
+@pytest.fixture(scope="session")
+def upload_token(mat_path: Path) -> str:
+    """Preview the recording once; keeps the upload/QC caches warm."""
+    payload = preview_service._build_preview_core(str(mat_path))
+    return str(payload["upload_token"])
+
+
+@pytest.fixture(scope="session")
+def prepared(mat_path: Path, upload_token: str, run_store: SessionStore) -> Any:
+    """``(loaded, prep)`` from the upload cache into the run's store, as the decompose run does."""
+    from muedit.api.cache import hold_upload
+
+    held = hold_upload(upload_token)
+    assert held is not None
+    loaded = load_step(str(mat_path), None, held.signal, None)
+    held.release()
+    prep = preprocess_step(
+        loaded=loaded,
+        duration=None,
+        manual_roi=False,
+        rois=[ROI],
+        params=DecompositionParameters(niter=NITER),
+        discard_overrides=None,
+        store=run_store,
+    )
+    return loaded, prep
+
+
+@pytest.fixture(scope="session")
+def decomposed(prepared: Any) -> Any:
+    """Decomposition filters for the postprocess stages."""
+    _, prep = prepared
+    return decompose_step(
+        prep=prep,
+        params=DecompositionParameters(niter=NITER),
+        rng=np.random.default_rng(0),
+        progress_cb=None,
+    )
+
+
+@pytest.fixture(scope="session")
+def post_windowed(prepared: Any, decomposed: Any, run_store: SessionStore) -> Any:
+    """Windowed postprocess output for the save stage."""
+    _, prep = prepared
+    return postprocess_step(
+        prep=prep,
+        decomposed=decomposed,
+        params=DecompositionParameters(niter=NITER),
+        progress_cb=None,
+        store=run_store,
+    )
+
+
+@pytest.fixture(scope="session")
+def saved_decomposition(mat_path: Path, tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """A saved decomposition (NPZ with embedded EMG) for the edit stages."""
+    result = run_decomposition(
+        str(mat_path),
+        rois=[ROI],
+        params=DecompositionParameters(niter=NITER),
+        save_npz=True,
+    )
+    assert result.save_path is not None
+    return {
+        "npz": Path(result.save_path),
+        "spike_times": result.spike_times,
+        "mu_grid_index": result.mu_grid_index,
+        "fsamp": result.fsamp,
+    }
+
+
+# ── Stages ────────────────────────────────────────────────────────────────────
+
+
+def test_load_stage(mat_path: Path) -> None:
+    signal, peak = _peak_mb(lambda: load_signal(str(mat_path)))
+    assert signal.data.shape == (N_CHANNELS, N_SAMPLES)
+    _check("load", peak)
+
+
+def test_preview_stage(mat_path: Path) -> None:
+    _, peak = _peak_mb(lambda: preview_service._build_preview_core(str(mat_path)))
+    _check("preview", peak)
+
+
+def test_series_stage(upload_token: str) -> None:
+    """What the QC stage draws for the whole recording: served from the pyramids."""
+
+    def _fetch() -> Any:
+        return [
+            series_frame("emg", upload_token, 0, 0, 1024),
+            series_frame("overview", upload_token, 0, 0, 1024),
+            series_frame("aux", upload_token, 0, 0, 1024),
+        ]
+
+    _, peak = _peak_mb(_fetch)
+    _check("series", peak)
+
+
+def test_qc_auto_stage(upload_token: str) -> None:
+    _, peak = _peak_mb(
+        lambda: preview_service.run_auto_qc_on_token(QcAutoPayload(upload_token=upload_token))
+    )
+    _check("qc_auto", peak)
+
+
+def test_preprocess_stage(mat_path: Path, upload_token: str, run_store: SessionStore) -> None:
+    from muedit.api.cache import hold_upload
+
+    def _run() -> Any:
+        held = hold_upload(upload_token)
+        assert held is not None
+        loaded = load_step(str(mat_path), None, held.signal, None)
+        held.release()
+        return preprocess_step(
+            loaded=loaded,
+            duration=None,
+            manual_roi=False,
+            rois=[ROI],
+            params=DecompositionParameters(niter=NITER),
+            discard_overrides=None,
+            store=run_store,
+        )
+
+    _, peak = _peak_mb(_run)
+    _check("preprocess", peak)
+
+
+def test_decompose_stage(prepared: Any) -> None:
+    _, prep = prepared
+
+    _, peak = _peak_mb(
+        lambda: decompose_step(
+            prep=prep,
+            params=DecompositionParameters(niter=NITER),
+            rng=np.random.default_rng(0),
+            progress_cb=None,
+        )
+    )
+    _check("decompose", peak)
+
+
+def test_postprocess_windowed_stage(
+    prepared: Any, decomposed: Any, run_store: SessionStore
+) -> None:
+    _, prep = prepared
+
+    _, peak = _peak_mb(
+        lambda: postprocess_step(
+            prep=prep,
+            decomposed=decomposed,
+            params=DecompositionParameters(niter=NITER),
+            progress_cb=None,
+            store=run_store,
+        )
+    )
+    _check("post_windowed", peak)
+
+
+def test_postprocess_full_trace_stage(
+    prepared: Any, decomposed: Any, run_store: SessionStore
+) -> None:
+    _, prep = prepared
+    params = DecompositionParameters(niter=NITER, full_trace=True)
+
+    _, peak = _peak_mb(
+        lambda: postprocess_step(
+            prep=prep, decomposed=decomposed, params=params, progress_cb=None, store=run_store
+        )
+    )
+    _check("post_full", peak)
+
+
+def test_postprocess_adaptive_stage(
+    prepared: Any, decomposed: Any, run_store: SessionStore
+) -> None:
+    _, prep = prepared
+    params = DecompositionParameters(niter=NITER, use_adaptive=True)
+
+    _, peak = _peak_mb(
+        lambda: postprocess_step(
+            prep=prep, decomposed=decomposed, params=params, progress_cb=None, store=run_store
+        )
+    )
+    _check("post_adaptive", peak)
+
+
+def test_save_stage(prepared: Any, post_windowed: Any) -> None:
+    loaded, prep = prepared
+
+    _, peak = _peak_mb(
+        lambda: export_step(
+            loaded=loaded,
+            prep=prep,
+            post=post_windowed,
+            params=DecompositionParameters(niter=NITER),
+            include_full_preview=False,
+            save_npz=True,
+            emg_data=loaded.signal.data,
+            progress_cb=None,
+        )
+    )
+    _check("save", peak)
+
+
+def test_bids_export_stage(prepared: Any, tmp_path: Path) -> None:
+    """The raw EMG goes to the BIDS EDF one block of data records at a time."""
+    loaded, prep = prepared
+
+    _, peak = _peak_mb(
+        lambda: export_bids_emg(
+            loaded.signal.data,
+            loaded.signal.fsamp,
+            prep.grid_names,
+            prep.coordinates,
+            prep.discard_channels,
+            tmp_path,
+            placement_scheme_description="Grid over the muscle belly, located by palpation.",
+        )
+    )
+    _check("bids_export", peak)
+
+
+def test_edit_load_stage(saved_decomposition: dict[str, Any]) -> None:
+    def _open() -> Any:
+        return editing_service.open_edit_session(str(saved_decomposition["npz"]))
+
+    _, peak = _peak_mb(_open)
+    _check("edit_load", peak)
+
+
+def test_update_filter_stage(saved_decomposition: dict[str, Any]) -> None:
+    """One update-filter click: the heaviest per-click edit operation."""
+    from tests._frames import unpack_frame
+
+    saved = saved_decomposition
+    assert len(saved["spike_times"]) > 0, "decomposition produced no motor units"
+    view_span = int(10.0 * saved["fsamp"])
+    view_start = (ROI[0] + ROI[1]) // 2 - view_span // 2
+
+    # Open the edit session exactly as the edit stage does.
+    opened = editing_service.open_edit_session(str(saved["npz"]))
+    meta, _ = unpack_frame(bytes(opened.body))
+    payload = FilterUpdatePayload(
+        token=meta["token"],
+        mu=0,
+        view_start=view_start,
+        view_end=view_start + view_span,
+        use_peeloff=True,
+    )
+    _, peak = _peak_mb(lambda: editing_service.apply_edit("update-filter", payload))
+    _check("update_filter", peak)

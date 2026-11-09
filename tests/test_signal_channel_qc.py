@@ -1,0 +1,131 @@
+"""Tests for the automatic bad-channel detector (:mod:`muedit.signal.channel_qc`)."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+import numpy as np
+import pytest
+
+from muedit.signal.channel_qc import (
+    _channel_qc_diagnostics,
+    detect_bad_channels_per_grid,
+)
+from tests._synthetic_emg import (
+    FSAMP,
+    N_CHANNELS,
+    N_SAMPLES,
+    bandpass,
+    correlated_emg,
+    grid_coords,
+)
+
+CH = 30
+
+
+def _flat(data: np.ndarray) -> None:
+    data[CH] = 1e-12
+
+
+def _dc_stuck(data: np.ndarray) -> None:
+    """Stuck at a DC level; QC sees it after the app's bandpass, i.e. near zero."""
+    data[CH] = bandpass(np.full((1, N_SAMPLES), 0.05))[0]
+
+
+def _saturated(data: np.ndarray) -> None:
+    clipped = np.random.default_rng(7).choice(N_SAMPLES, size=N_SAMPLES // 20, replace=False)
+    data[CH, clipped] = data[CH].max() * 10
+
+
+def _noisy(data: np.ndarray) -> None:
+    data[CH] = bandpass(np.random.default_rng(99).normal(0, 0.02, (1, N_SAMPLES)))[0]
+
+
+def _stuck_levels(data: np.ndarray) -> None:
+    """Stuck between two ADC levels with a handful of transitions; QC sees it bandpassed."""
+    stuck = np.full(N_SAMPLES, -0.1, dtype=np.float32)
+    stuck[9000:9200] = 0.1
+    stuck[15000:15100] = 0.1
+    data[CH] = bandpass(stuck[None])[0]
+
+
+def _low_snr(data: np.ndarray) -> None:
+    """Weak and uncorrelated with its neighbours: poor contact."""
+    data[CH] = bandpass(np.random.default_rng(77).normal(0, 0.003, (1, N_SAMPLES)))[0]
+
+
+def _intermittent(data: np.ndarray) -> None:
+    """Quiet baseline with brief contact make/break transients."""
+    data[CH] *= 0.1
+    for center in (5000, 10000, 15000):
+        data[CH, center - 10 : center + 10] += 0.3
+
+
+def _contact_loss(data: np.ndarray) -> None:
+    data[CH, 6000:10000] = 0.0
+
+
+@pytest.mark.parametrize(
+    "inject,reason",
+    [
+        (_flat, "flat"),
+        (_dc_stuck, "flat"),
+        (_saturated, "saturated"),
+        (_noisy, "noisy"),
+        (_stuck_levels, "noisy"),
+        (_low_snr, "low-SNR"),
+        (_intermittent, "intermittent"),
+        (_contact_loss, "contact-loss"),
+    ],
+    ids=[
+        "flat",
+        "dc-stuck",
+        "saturated",
+        "noisy",
+        "stuck-levels",
+        "low-snr",
+        "intermittent",
+        "contact-loss",
+    ],
+)
+def test_fault_is_flagged_with_reason(inject: Callable[[np.ndarray], None], reason: str) -> None:
+    data = correlated_emg()
+    inject(data)
+    diag = _channel_qc_diagnostics(data, FSAMP, grid_coords())
+    assert np.flatnonzero(diag.mask).tolist() == [CH]
+    assert reason in diag.reasons[CH]
+
+
+def test_clean_grid_has_no_flags() -> None:
+    mask = _channel_qc_diagnostics(correlated_emg(), FSAMP, grid_coords()).mask
+    assert mask.dtype == bool and mask.shape == (N_CHANNELS,)
+    assert not mask.any()
+
+
+def test_quiet_but_correlated_channel_is_not_low_snr() -> None:
+    """A channel over a quiet part of the muscle is weak but still tracks its neighbours."""
+    data = correlated_emg()
+    data[20] *= 0.05
+    assert "low-SNR" not in _channel_qc_diagnostics(data, FSAMP, grid_coords()).reasons[20]
+
+
+def test_per_grid_masks_use_grid_local_indices() -> None:
+    data = np.vstack([correlated_emg(seed=100), correlated_emg(seed=101)])
+    data[5] = 1e-12
+    data[N_CHANNELS + 6] = 1e-12
+    masks = detect_bad_channels_per_grid(
+        data, FSAMP, [N_CHANNELS, N_CHANNELS], [grid_coords(), grid_coords()]
+    )
+    assert [np.flatnonzero(m).tolist() for m in masks] == [[5], [6]]
+
+
+def test_per_grid_ignores_samples_outside_keep() -> None:
+    """Transients confined to masked-out samples do not flag the channel."""
+    data = correlated_emg()
+    keep = np.ones(N_SAMPLES, dtype=bool)
+    for center in (5000, 10000, 15000):
+        data[CH, center - 10 : center + 10] += 3.0
+        keep[center - 60 : center + 60] = False
+    coords = [grid_coords()]
+    assert detect_bad_channels_per_grid(data, FSAMP, [N_CHANNELS], coords)[0][CH]
+    assert not detect_bad_channels_per_grid(data, FSAMP, [N_CHANNELS], coords, keep=keep)[0].any()

@@ -1,30 +1,35 @@
+/**
+ * The QC stage: its service (channel traces and plots, the aux channels, the
+ * selected grid) and its event bindings.
+ */
 import {
-  syncRois as syncRoisController,
-  requestAutoQc as requestAutoQcFeature,
-  requestQcGridWindow as requestQcGridWindowFeature,
-  requestPreview as requestPreviewFeature,
+  requestAutoQc,
+  createQcTraces,
+  requestPreview,
 } from "../../signal/qc.js";
 import {
   populateAuxSelector as populateAuxSelectorFeature,
   renderAuxiliaryChannels as renderAuxiliaryChannelsFeature,
-  refreshVisuals as refreshVisualsController,
-  enableRoiSelection as enableRoiSelectionController,
-  renderChannelQC as renderChannelQCController,
+  refreshVisuals as refreshVisualsFeature,
+  enableRoiSelection,
+  drawChannelQC,
 } from "../../view/qc-renderer.js";
-import {
-  beginRawPreviewTransition,
-  rollbackRawPreviewTransition,
-} from "../../state/transitions.js";
-import { resetBidsEntityDefaults } from "../../view/bids-renderer.js";
 import {
   removeLastArtifactRegion,
   setArtifactMode,
   setCurrentGrid,
 } from "../../state/actions.js";
-import { roiEnd, roiStart } from "../../state/selectors.js";
+import { oncePerFrame } from "../../view/plots.js";
+import {
+  chooseSegmentType,
+  requestSegmentation,
+  syncChosenWindows,
+  syncRois,
+} from "../../signal/segments.js";
 
 /** @typedef {import("../context.js").App} App */
 /** @typedef {import("../context.js").QcStage} QcStage */
+/** @typedef {import("../context.js").Els} Els */
 
 /**
  * @param {App} app
@@ -43,89 +48,35 @@ export function createQcStageService(app) {
     renderAuxiliaryChannelsFeature(els, state);
   }
 
-  /** @type {QcStage["requestQcGridWindow"]} */
-  async function requestQcGridWindow(
-    gridIdx,
-    start = 0,
-    end = state.seriesLength,
-  ) {
-    return requestQcGridWindowFeature(app, gridIdx, start, end);
-  }
-
-  /** @type {QcStage["requestPreview"]} */
-  async function requestPreview(options = {}) {
-    return requestPreviewFeature(app, options);
-  }
+  /** @type {QcStage["ensureQcTraces"]} */
+  const ensureQcTraces = createQcTraces(app);
 
   /** @type {QcStage["handleRawFilePath"]} */
   async function handleRawFilePath(path, name, options = {}) {
-    const syntheticFile = { name, path };
-    beginRawPreviewTransition(state, syntheticFile);
-    resetBidsEntityDefaults(els, name);
-    app.setStatus("File ready");
-    app.updateStartAvailability();
-    const ok = await requestPreview({
-      silentFailure: options.silentPreviewFailure ?? false,
-      filepath: path,
+    const ok = await requestPreview(app, {
+      silentFailure: options.silentFailure,
+      file: { name, path },
     });
-    if (!ok) {
-      rollbackRawPreviewTransition(state);
-      app.updateStartAvailability();
-    }
+    if (ok) app.updateStartAvailability();
     return ok;
   }
 
   /** @type {QcStage["renderChannelQC"]} */
-  function renderChannelQC(waitForMiniPlots = false) {
-    return renderChannelQCController(app, waitForMiniPlots);
-  }
-
-  /** @type {QcStage["enableRoiSelection"]} */
-  function enableRoiSelection(canvasId) {
-    return enableRoiSelectionController(app, canvasId);
+  function renderChannelQC() {
+    // A grid the channel data does not reach shows the first one.
+    if (!state.channelMeans[state.currentGrid] && state.channelMeans.length)
+      setCurrentGrid(state, 0);
+    drawChannelQC(app);
+    app.ensureQcTraces();
   }
 
   /** @type {QcStage["refreshVisuals"]} */
   function refreshVisuals() {
-    refreshVisualsController(app);
+    refreshVisualsFeature(app);
   }
 
-  /** @type {QcStage["syncRois"]} */
-  function syncRois(nwin) {
-    syncRoisController(state, nwin);
-  }
-
-  /** @type {QcStage["runAutoQc"]} */
-  function runAutoQc() {
-    return requestAutoQcFeature(app);
-  }
-
-  /** Arm (or cancel) artifact selection for the next drag on the EMG plot. */
-  /** @type {QcStage["toggleArtifactMode"]} */
-  function toggleArtifactMode() {
-    setArtifactMode(state, !state.artifactMode);
-    refreshVisuals();
-    app.updateProgress(
-      undefined,
-      state.artifactMode
-        ? "Drag on the EMG plot to mark an artifact window"
-        : "Artifact selection cancelled",
-    );
-  }
-
-  /** @type {QcStage["removeLastArtifact"]} */
-  function removeLastArtifact() {
-    const removed = removeLastArtifactRegion(state);
-    setArtifactMode(state, false);
-    refreshVisuals();
-    const n = state.artifactRegions.length;
-    app.updateProgress(
-      undefined,
-      removed
-        ? `Artifact window removed (${n} left)`
-        : "No artifact windows to remove",
-    );
-  }
+  /** @type {QcStage["scheduleRefreshVisuals"]} */
+  const scheduleRefreshVisuals = oncePerFrame(() => app.refreshVisuals());
 
   /** @type {QcStage["setSelectedGrid"]} */
   function setSelectedGrid(idx) {
@@ -135,28 +86,114 @@ export function createQcStageService(app) {
       tab.classList.toggle("active", i === state.currentGrid);
     });
     renderChannelQC();
-    renderAuxiliaryChannels();
-    const roi = state.rois?.[0];
-    requestQcGridWindow(
-      state.currentGrid,
-      roiStart(roi),
-      roiEnd(roi, state.seriesLength),
-    );
   }
 
   return {
     populateAuxSelector,
     renderAuxiliaryChannels,
-    requestQcGridWindow,
-    requestPreview,
+    ensureQcTraces,
     handleRawFilePath,
     renderChannelQC,
-    enableRoiSelection,
     refreshVisuals,
-    syncRois,
-    runAutoQc,
-    toggleArtifactMode,
-    removeLastArtifact,
+    scheduleRefreshVisuals,
     setSelectedGrid,
   };
+}
+
+/**
+ * Arm (or cancel) artifact selection for the next drag on the EMG plot.
+ *
+ * @param {App} app
+ */
+function toggleArtifactMode(app) {
+  const { state } = app;
+  setArtifactMode(state, !state.artifactMode);
+  app.refreshVisuals();
+  app.setStatus(
+    state.artifactMode
+      ? "Drag on the EMG plot to mark an artifact window"
+      : "Artifact selection cancelled",
+  );
+}
+
+/** @param {App} app */
+function removeLastArtifact(app) {
+  const { state } = app;
+  const removed = removeLastArtifactRegion(state);
+  setArtifactMode(state, false);
+  app.refreshVisuals();
+  const n = state.artifactRegions.length;
+  app.setStatus(
+    removed
+      ? `Artifact window removed (${n} left)`
+      : "No artifact windows to remove",
+  );
+}
+
+/**
+ * @param {Els} els
+ * @param {boolean} open
+ */
+function setSegmentMenuOpen(els, open) {
+  if (!els.segmentTypeMenu) return;
+  els.segmentTypeMenu.hidden = !open;
+  els.segmentTypeBtn?.setAttribute("aria-expanded", String(open));
+}
+
+/**
+ * Choose or drop every segment of the type a picker box names.
+ *
+ * @param {App} app
+ * @param {HTMLInputElement} box
+ */
+function chooseTypeFromBox(app, box) {
+  const count = chooseSegmentType(app.state, box.value, box.checked);
+  const windowsText = syncChosenWindows(app, count);
+  app.refreshVisuals();
+  app.setStatus(
+    `${box.checked ? "Added" : "Removed"} ${box.value}s — ${windowsText}`,
+  );
+}
+
+/** @param {App} app */
+export function setupQcEvents(app) {
+  const { els, state } = app;
+
+  els.qcAutoBtn?.addEventListener("click", () => void requestAutoQc(app));
+  els.qcSegmentBtn?.addEventListener(
+    "click",
+    () => void requestSegmentation(app),
+  );
+  els.segmentTypeBtn?.addEventListener("click", () =>
+    setSegmentMenuOpen(els, !!els.segmentTypeMenu?.hidden),
+  );
+  els.segmentTypeMenu?.addEventListener("change", (e) =>
+    chooseTypeFromBox(app, /** @type {HTMLInputElement} */ (e.target)),
+  );
+  window.addEventListener("pointerdown", (e) => {
+    const target = /** @type {Node} */ (e.target);
+    if (target !== els.segmentTypeBtn && !els.segmentTypeMenu?.contains(target))
+      setSegmentMenuOpen(els, false);
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setSegmentMenuOpen(els, false);
+  });
+  els.artifactAddBtn?.addEventListener("click", () => toggleArtifactMode(app));
+  els.artifactRemoveBtn?.addEventListener("click", () =>
+    removeLastArtifact(app),
+  );
+  app.refreshVisuals();
+  enableRoiSelection(app, "emgCanvas");
+  enableRoiSelection(app, "auxCanvas");
+
+  els.nwindows?.addEventListener("change", () => {
+    syncRois(state, Number(els.nwindows.value) || 1);
+    app.refreshVisuals();
+    els.nwindows.blur();
+  });
+
+  els.auxSelector?.addEventListener("change", () => {
+    app.renderAuxiliaryChannels();
+    els.auxSelector.blur();
+  });
 }

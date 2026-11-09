@@ -1,222 +1,204 @@
 /**
- * Decoders for the compact binary transport the API uses for large float32
- * matrices (pulse trains). Each payload is either plain JSON or a binary frame:
+ * Codecs for the binary transport the API uses for arrays (viewport series, discharge times).
  *
- *   magic(4 bytes) | uint32 version | uint32 metaLen | (uint32 rows, uint32 cols)
- *   per array | JSON metadata (metaLen bytes) | float32 array data
+ * MUB1, mirroring `pack_frame` / `unpack_frame` in `api/binary.py`:
  *
- * All integers/floats are little-endian. When the magic prefix is absent the
- * server fell back to JSON, so the bytes are parsed as text instead. Mirrors the
- * Python `pack_json_f32_payload` packer in `api/binary.py`.
+ *   "MUB1" | uint32 headerLen | header JSON {meta, arrays} | pad to 8 |
+ *   array data, each array at an 8-byte-aligned offset from the data start
+ *
+ * Little-endian. The alignment lets every array be read as a typed-array view
+ * without copying.
  */
 /** @typedef {import("../app/context.js").JsonObject} JsonObject */
 
 const textDecoder = new TextDecoder();
 
+const FRAME_ALIGN = 8;
+
+const FRAME_TYPES = {
+  f4: Float32Array,
+  i4: Int32Array,
+  i8: BigInt64Array,
+};
+
+/**
+ * @typedef {keyof typeof FRAME_TYPES} FrameDtype
+ * @typedef {Float32Array | Int32Array | BigInt64Array} FrameData
+ * @typedef {{ dtype: FrameDtype, shape: number[], data: FrameData }} FrameArray
+ */
+
+/** @param {number} n */
+function frameAligned(n) {
+  return n + ((FRAME_ALIGN - (n % FRAME_ALIGN)) % FRAME_ALIGN);
+}
+
+/** @param {number[]} shape */
+function frameCount(shape) {
+  return shape.reduce((n, d) => n * d, 1);
+}
+
+/**
+ * Decode a MUB1 frame; arrays are views into `buffer`, not copies.
+ *
+ * @param {ArrayBuffer} buffer
+ * @returns {{ meta: JsonObject, arrays: Record<string, FrameArray> }}
+ */
+function decodeFrame(buffer) {
+  if (
+    !buffer ||
+    buffer.byteLength < 8 ||
+    textDecoder.decode(new Uint8Array(buffer, 0, 4)) !== "MUB1"
+  ) {
+    throw new Error("Invalid MUB1 frame");
+  }
+  const headerLen = new DataView(buffer).getUint32(4, true);
+  if (8 + headerLen > buffer.byteLength) {
+    throw new Error("Invalid MUB1 frame: header runs past the end");
+  }
+  const header = JSON.parse(
+    textDecoder.decode(new Uint8Array(buffer, 8, headerLen)),
+  );
+  const dataStart = frameAligned(8 + headerLen);
+  /** @type {Record<string, FrameArray>} */
+  const arrays = {};
+  for (const spec of header.arrays || []) {
+    const Typed = FRAME_TYPES[/** @type {FrameDtype} */ (spec.dtype)];
+    if (!Typed) throw new Error(`Unsupported MUB1 dtype: ${spec.dtype}`);
+    const count = frameCount(spec.shape);
+    const offset = dataStart + spec.offset;
+    if (offset + count * Typed.BYTES_PER_ELEMENT > buffer.byteLength) {
+      throw new Error(`MUB1 array ${spec.name} runs past the end`);
+    }
+    arrays[spec.name] = {
+      dtype: spec.dtype,
+      shape: spec.shape,
+      data: new Typed(buffer, offset, count),
+    };
+  }
+  return { meta: header.meta || {}, arrays };
+}
+
+/**
+ * Rows of a CSR pair as views into the frame: row `i` is
+ * `values[offsets[i]:offsets[i + 1]]`. Each MU's discharge times arrive this way.
+ *
+ * @param {FrameArray | undefined} values
+ * @param {FrameArray | undefined} offsets
+ * @returns {Int32Array[]}
+ */
+function csrRows(values, offsets) {
+  if (!values || !offsets) return [];
+  const data = /** @type {Int32Array} */ (values.data);
+  const ends = /** @type {BigInt64Array} */ (offsets.data);
+  const rows = [];
+  for (let i = 0; i + 1 < ends.length; i++) {
+    rows.push(data.subarray(Number(ends[i]), Number(ends[i + 1])));
+  }
+  return rows;
+}
+
+/**
+ * @typedef {object} EditSessionFrame What the edit session sends: its fields, and per-MU discharge times.
+ * @property {JsonObject} meta
+ * @property {Int32Array[]} spikeTimes Discharge times of every MU (open) or of the changed ones (an edit).
+ */
+
 /**
  * @param {ArrayBuffer} buffer
- * @param {string} magic
+ * @returns {EditSessionFrame}
  */
-function hasMagic(buffer, magic) {
-  if (!buffer || buffer.byteLength < magic.length) return false;
-  const sig = new Uint8Array(buffer, 0, magic.length);
-  for (let i = 0; i < magic.length; i++) {
-    if (sig[i] !== magic.charCodeAt(i)) return false;
-  }
-  return true;
-}
-
-/**
- * @param {DataView} view
- * @param {number} offset
- * @param {number} count
- */
-function readFloat32Values(view, offset, count) {
-  const out = new Float32Array(count);
-  let cursor = offset;
-  for (let i = 0; i < count; i++) {
-    out[i] = view.getFloat32(cursor, true);
-    cursor += 4;
-  }
-  return out;
-}
-
-/**
- * @param {Float32Array} raw
- * @param {number} rows
- * @param {number} cols
- * @returns {number[][]}
- */
-function to2d(raw, rows, cols) {
-  const out = [];
-  for (let r = 0; r < rows; r++) {
-    const row = new Array(cols);
-    const base = r * cols;
-    for (let c = 0; c < cols; c++) row[c] = raw[base + c];
-    out.push(row);
-  }
-  return out;
-}
-
-/**
- * @param {ArrayBuffer} buffer
- * @param {string | null} [formatHeader]
- */
-export function isQcRawF32Payload(buffer, formatHeader = "") {
-  return formatHeader === "qc-raw-f32-v1" || hasMagic(buffer, "MQCR");
-}
-
-/**
- * @param {ArrayBuffer} buffer
- * @returns {JsonObject}
- */
-export function decodeQcJsonPayload(buffer) {
-  return JSON.parse(textDecoder.decode(new Uint8Array(buffer)));
-}
-
-/**
- * @param {ArrayBuffer} buffer
- */
-export function decodeQcRawF32(buffer) {
-  // Wire format:
-  // 4 bytes magic "MQCR" + uint32 version + fixed metadata fields + repeated channel blocks.
-  // Each channel block is: int32 channel_index, uint32 n, float32[n] samples.
-  const view = new DataView(buffer);
-  if (!hasMagic(buffer, "MQCR")) {
-    throw new Error("Invalid QC raw payload");
-  }
-  let offset = 4;
-  const version = view.getUint32(offset, true);
-  offset += 4;
-  if (version !== 1) {
-    throw new Error(`Unsupported QC raw payload version: ${version}`);
-  }
-  const grid_index = view.getInt32(offset, true);
-  offset += 4;
-  const channel_index = view.getInt32(offset, true);
-  offset += 4;
-  const start = view.getInt32(offset, true);
-  offset += 4;
-  const end = view.getInt32(offset, true);
-  offset += 4;
-  const total_samples = view.getInt32(offset, true);
-  offset += 4;
-  const fsamp = view.getFloat32(offset, true);
-  offset += 4;
-  const nChannels = view.getUint32(offset, true);
-  offset += 4;
-
-  const channels = [];
-  for (let i = 0; i < nChannels; i++) {
-    const chIdx = view.getInt32(offset, true);
-    offset += 4;
-    const n = view.getUint32(offset, true);
-    offset += 4;
-    const series = new Float32Array(buffer, offset, n);
-    offset += n * 4;
-    channels.push({ channel_index: chIdx, series: Array.from(series) });
-  }
+export function decodeEditSessionFrame(buffer) {
+  const { meta, arrays } = decodeFrame(buffer);
   return {
-    grid_index,
-    channel_index,
-    start,
-    end,
-    total_samples,
-    fsamp,
-    channels,
+    meta,
+    spikeTimes: csrRows(arrays.spikes, arrays.spike_offsets),
   };
 }
 
 /**
- * @param {ArrayBuffer} buffer
- * @param {string | null} [formatHeader]
+ * @typedef {{ min: Float32Array, max: Float32Array }} Envelope
+ * @typedef {Envelope | Float32Array} SeriesRow One row of a viewport: min/max per bin, or the samples.
+ * @typedef {{ meta: JsonObject, rows: SeriesRow[] }} SeriesView
  */
-function isEditLoadF32Payload(buffer, formatHeader = "") {
-  return formatHeader === "edit-load-f32-v1" || hasMagic(buffer, "MELD");
-}
 
 /**
- * @param {ArrayBuffer} buffer
- * @param {string | null} [formatHeader]
- * @returns {JsonObject}
+ * @param {FrameArray | undefined} arr
+ * @returns {Float32Array[]}
  */
-export function decodeEditLoadPayload(buffer, formatHeader = "") {
-  if (!isEditLoadF32Payload(buffer, formatHeader)) {
-    const text = textDecoder.decode(new Uint8Array(buffer));
-    return JSON.parse(text);
-  }
-  const view = new DataView(buffer);
-  if (!hasMagic(buffer, "MELD"))
-    throw new Error("Invalid edit-load binary payload");
-  let offset = 4;
-  const version = view.getUint32(offset, true);
-  offset += 4;
-  if (version !== 1)
-    throw new Error(`Unsupported edit-load payload version: ${version}`);
-  const metaLen = view.getUint32(offset, true);
-  offset += 4;
-  const rows = view.getUint32(offset, true);
-  offset += 4;
-  const cols = view.getUint32(offset, true);
-  offset += 4;
-  const meta = JSON.parse(
-    textDecoder.decode(new Uint8Array(buffer, offset, metaLen)),
-  );
-  offset += metaLen;
-  const pulse = to2d(readFloat32Values(view, offset, rows * cols), rows, cols);
-  return { ...meta, pulse_trains_full: pulse };
-}
-
-/**
- * @param {ArrayBuffer} buffer
- * @param {string | null} [formatHeader]
- */
-function isDecomposePreviewF32Payload(buffer, formatHeader = "") {
-  return (
-    formatHeader === "decompose-preview-f32-v1" || hasMagic(buffer, "MDPV")
+function frameRowViews(arr) {
+  if (!arr || arr.shape.length !== 2) return [];
+  const [n, cols] = arr.shape;
+  const data = /** @type {Float32Array} */ (arr.data);
+  return Array.from({ length: n }, (_, r) =>
+    data.subarray(r * cols, (r + 1) * cols),
   );
 }
 
 /**
- * @param {ArrayBuffer} buffer
- * @param {string | null} [formatHeader]
- * @returns {JsonObject}
+ * A viewport's rows: the samples, or min/max per bin.
+ *
+ * @param {JsonObject} meta
+ * @param {Record<string, FrameArray>} arrays
+ * @returns {SeriesRow[]}
  */
-export function decodeDecomposePreviewPayload(buffer, formatHeader = "") {
-  if (!isDecomposePreviewF32Payload(buffer, formatHeader)) {
-    const text = textDecoder.decode(new Uint8Array(buffer));
-    return JSON.parse(text);
-  }
-  const view = new DataView(buffer);
-  if (!hasMagic(buffer, "MDPV"))
-    throw new Error("Invalid decompose-preview payload");
-  let offset = 4;
-  const version = view.getUint32(offset, true);
-  offset += 4;
-  if (version !== 1)
-    throw new Error(
-      `Unsupported decompose-preview payload version: ${version}`,
-    );
-  const metaLen = view.getUint32(offset, true);
-  offset += 4;
-  const rowsFull = view.getUint32(offset, true);
-  offset += 4;
-  const colsFull = view.getUint32(offset, true);
-  offset += 4;
-  const rowsAll = view.getUint32(offset, true);
-  offset += 4;
-  const colsAll = view.getUint32(offset, true);
-  offset += 4;
-  const meta = JSON.parse(
-    textDecoder.decode(new Uint8Array(buffer, offset, metaLen)),
-  );
-  offset += metaLen;
-  const full = readFloat32Values(view, offset, rowsFull * colsFull);
-  offset += rowsFull * colsFull * 4;
-  const all = readFloat32Values(view, offset, rowsAll * colsAll);
+function seriesRows(meta, arrays) {
+  if (meta.kind === "samples") return frameRowViews(arrays.samples);
+  const maxs = frameRowViews(arrays.max);
+  return frameRowViews(arrays.min).map((min, r) => ({ min, max: maxs[r] }));
+}
+
+/**
+ * Decode a `/series/*` frame into one row per channel, as views into `buffer`.
+ *
+ * @param {ArrayBuffer} buffer
+ * @returns {SeriesView}
+ */
+export function decodeSeriesFrame(buffer) {
+  const { meta, arrays } = decodeFrame(buffer);
+  return { meta, rows: seriesRows(meta, arrays) };
+}
+
+/**
+ * One MU's pulse train over `[start, end)` as drawn, with the discharges and
+ * artifacts in that window and the train's value at each.
+ *
+ * @typedef {object} PulseView
+ * @property {number} mu
+ * @property {number} start
+ * @property {number} end
+ * @property {number} bins
+ * @property {number} version Changes whenever the MU is edited.
+ * @property {boolean} flagged
+ * @property {SeriesRow} row
+ * @property {Int32Array} spikes
+ * @property {Float32Array} spikeValues
+ * @property {Int32Array} artifacts
+ * @property {Float32Array} artifactValues
+ */
+
+/**
+ * Decode a `/series/pulse` frame; every array is a view into `buffer`.
+ *
+ * @param {ArrayBuffer} buffer
+ * @returns {PulseView}
+ */
+export function decodePulseFrame(buffer) {
+  const { meta, arrays } = decodeFrame(buffer);
+  const ints = (/** @type {string} */ name) =>
+    /** @type {Int32Array} */ (arrays[name]?.data ?? new Int32Array(0));
+  const floats = (/** @type {string} */ name) =>
+    /** @type {Float32Array} */ (arrays[name]?.data ?? new Float32Array(0));
   return {
-    ...meta,
-    pulse_trains_full: to2d(full, rowsFull, colsFull),
-    pulse_trains_all: to2d(all, rowsAll, colsAll),
+    mu: Number(meta.mu),
+    start: Number(meta.start),
+    end: Number(meta.end),
+    bins: Number(meta.bins),
+    version: Number(meta.version),
+    flagged: !!meta.flagged,
+    row: seriesRows(meta, arrays)[0],
+    spikes: ints("spikes"),
+    spikeValues: floats("spike_values"),
+    artifacts: ints("artifacts"),
+    artifactValues: floats("artifact_values"),
   };
 }

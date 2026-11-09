@@ -27,7 +27,7 @@ import { renderArtifactControls } from "../../view/qc-renderer.js";
  */
 
 /** @type {Record<StageKey, StageDefinition>} */
-export const STAGES = {
+const STAGES = {
   qc: {
     panel: "stageQc",
     blocked: ({ state }) => (state.file ? null : ""),
@@ -46,23 +46,25 @@ export const STAGES = {
     panel: "stageRun",
     blocked({ state }) {
       if (!state.file) return "";
-      if (!state.previewSeries?.length) {
+      if (!state.gridSeries?.length) {
         return "Run step is locked until preview is loaded";
       }
+      // Without a run the page is empty: Decompose signal on QC starts one.
+      if (!state.runLive) return "";
       return null;
     },
     render(app) {
-      app.renderMuExplorer();
+      app.renderRunStage();
     },
   },
   edit: {
     panel: "stageEdit",
     blocked: () => null,
     render(app) {
-      if (app.state.edit.distimes?.length) app.renderEditExplorer();
+      if (app.state.edit.spikeTimes.length) app.renderEditExplorer();
     },
     enter(app) {
-      if (!app.state.edit.distimes?.length) {
+      if (!app.state.edit.spikeTimes.length) {
         app.setStatus("Load a decomposition file to edit", "muted");
       }
     },
@@ -71,7 +73,7 @@ export const STAGES = {
     exit(app) {
       if (!app.state.edit.mode) return;
       app.setEditMode(null);
-      app.setEditStatus("", "muted");
+      app.setStatus("", "muted");
     },
   },
 };
@@ -93,7 +95,11 @@ export function switchStage(app, target) {
   }
 
   const from = state.currentStage;
-  if (from !== target) STAGES[from]?.exit?.(app);
+  if (from !== target) {
+    STAGES[from]?.exit?.(app);
+    // What finished on the page left is done with; errors and work under way stay.
+    if (els.status?.dataset.tone === "success") app.setStatus("", "muted");
+  }
   setCurrentStage(state, target);
   for (const [key, stage] of Object.entries(STAGES)) {
     els[stage.panel]?.classList.toggle("active", key === target);
@@ -102,7 +108,7 @@ export function switchStage(app, target) {
 
   app.updateStepAvailability();
   app.updateWorkflowStepper(target);
-  app.scheduleLayoutRerender(0);
+  app.scheduleLayoutRerender();
 }
 
 /** @param {App} app */

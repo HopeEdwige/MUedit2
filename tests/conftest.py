@@ -1,16 +1,23 @@
-"""Shared fixtures for the I/O test suite."""
+"""Shared fixtures for the test suite."""
 
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 import scipy.io
+from starlette.testclient import TestClient
 
+from muedit import storage
+from muedit.decomp.types import DecomposeStepOutput, PreprocessStepOutput
 from muedit.models import SignalImport
+from muedit.paths import CACHE_DIR_ENV
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = REPO_ROOT / "data"
@@ -24,8 +31,10 @@ DATA_FIXTURES = frozenset(
         "otb_plus_file",
         "otb4_file",
         "intan_dir",
+        "openephys_dir",
         "decomp_mat_file",
         "novecento_otb4_file",
+        "passiflore_otb4_file",
         "simulation_mat_files",
         "real_reference",
     }
@@ -39,6 +48,33 @@ def require_sample(path: Path) -> Path:
             pytest.fail(message)
         pytest.skip(message)
     return path
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Keep session stores in a throwaway folder, not the user's cache."""
+    if not os.environ.get("MUEDIT_CACHE_DIR"):
+        folder = tempfile.mkdtemp(prefix="muedit-test-cache-")
+        os.environ["MUEDIT_CACHE_DIR"] = folder
+        config.add_cleanup(lambda: shutil.rmtree(folder, ignore_errors=True))
+
+
+@pytest.fixture(autouse=True)
+def config_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A config file of the test's own, so no test reads or writes the user's."""
+    from muedit.api import config
+
+    path = tmp_path / "config" / "config.json"
+    monkeypatch.setattr(config, "config_file", lambda: path)
+    return path
+
+
+@pytest.fixture
+def cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A per-test cache folder for session stores, with the default disk reserve."""
+    folder = tmp_path / "cache"
+    monkeypatch.setenv(CACHE_DIR_ENV, str(folder))
+    monkeypatch.delenv(storage.DISK_RESERVE_ENV, raising=False)
+    return folder
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -74,6 +110,12 @@ def intan_dir() -> Path:
 
 
 @pytest.fixture(scope="session")
+def openephys_dir() -> Path:
+    """Open Ephys binary recording folder (2x MYOMNP-1x32 + 8 ADC @ 20 kHz, grid sidecar)."""
+    return require_sample(DATA_DIR / "Record Node 101" / "experiment1" / "21_con_fs")
+
+
+@pytest.fixture(scope="session")
 def decomp_mat_file() -> Path:
     """Real MATLAB v7.3 decomposition artifact (Novecento, 54 MUs)."""
     return require_sample(DATA_DIR / "Novecento.otb4_decomp.mat")
@@ -83,6 +125,12 @@ def decomp_mat_file() -> Path:
 def novecento_otb4_file() -> Path:
     """OT Bioelettronica ``.otb4`` archive (Novecento, 6x HD08MM1305, 2000 Hz)."""
     return require_sample(DATA_DIR / "Novecento.otb4")
+
+
+@pytest.fixture(scope="session")
+def passiflore_otb4_file() -> Path:
+    """OT Bioelettronica ``.otb4`` archive (Quattrocento, 6x GR08MM1305, a trapezoid track)."""
+    return require_sample(DATA_DIR / "Passiflore_03_6_trap20.otb4")
 
 
 @pytest.fixture(scope="session")
@@ -102,9 +150,9 @@ _REAL_EMG_SECONDS = 5.0
 @pytest.fixture(scope="session")
 def real_emg_mat_file(decomp_mat_file: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A pure-signal ``.mat`` carrying genuine EMG from the Novecento recording."""
-    from muedit.decomp.decomposition_file import load_decomposition_signal_context
+    from muedit.decomp.decomposition_file import load_decomposition
 
-    ctx = load_decomposition_signal_context(str(decomp_mat_file))
+    _, ctx = load_decomposition(str(decomp_mat_file))
     assert ctx is not None, "decomp mat did not yield an embedded signal context"
 
     fsamp = ctx.fsamp
@@ -191,3 +239,94 @@ def pytest_terminal_summary(terminalreporter: Any) -> None:
         terminalreporter.write_line(f"CSVs written to {_report.report_dir()}:")
         for path in paths:
             terminalreporter.write_line(f"  {path.name}")
+
+
+@pytest.fixture(scope="module")
+def client(tmp_path_factory: pytest.TempPathFactory) -> Iterator[TestClient]:
+    """One app client for all of a module's tests, which share its uploads (``api``: one per test)."""
+    from tests._api import api_client
+
+    with api_client(tmp_path_factory.mktemp("data")) as client:
+        yield client
+
+
+@pytest.fixture(scope="module")
+def signal_mat(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A recording of noise on one 64-channel grid, without auxiliary channels."""
+    from tests._api import N_CHANNELS, N_SAMPLES, write_recording
+
+    emg = np.random.default_rng(0).normal(0, 1, (N_CHANNELS, N_SAMPLES))
+    return write_recording(tmp_path_factory.mktemp("recording") / "synthetic_signal.mat", emg)
+
+
+@pytest.fixture(scope="module")
+def upload_token(client: TestClient, signal_mat: Path) -> str:
+    """``signal_mat`` loaded in its own tab: a tab keeps one upload."""
+    from tests._api import upload
+
+    return upload(client, signal_mat, "fixture-upload")
+
+
+@pytest.fixture
+def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """A fresh app client: its projects under ``tmp_path / "data"``, its stores and logs in ``tmp_path / "cache"``."""
+    from tests._api import api_client
+
+    monkeypatch.setenv("MUEDIT_CACHE_DIR", str(tmp_path / "cache"))
+    with api_client(tmp_path / "data") as client:
+        yield client
+
+
+# ── Synthetic decomposition inputs ───────────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def short_emg() -> np.ndarray:
+    """``short_recording``: ten channels of MU activity, for the extender and adaptive tests."""
+    from tests._synthetic_emg import short_recording
+
+    return short_recording()
+
+
+@pytest.fixture(scope="module")
+def synthetic_mu() -> dict[str, np.ndarray]:
+    """EMG with one target MU, one interfering MU and noise, for the edit operations."""
+    from tests import _editing_data
+
+    return _editing_data.synthetic_mu()
+
+
+@pytest.fixture(scope="module")
+def store_prep() -> dict[str, Any]:
+    """``synthetic_recording`` preprocessed on the heap and into a session store."""
+    from muedit.decomp.preprocess import load_step, preprocess_step
+    from tests._synthetic_emg import ACTIVE_ROI, STORE_PARAMS, synthetic_recording
+
+    loaded = load_step("synthetic.mat", None, synthetic_recording(), None)
+
+    def prep(store: storage.SessionStore | None) -> PreprocessStepOutput:
+        return preprocess_step(
+            loaded=loaded,
+            duration=None,
+            manual_roi=False,
+            rois=[ACTIVE_ROI],
+            params=STORE_PARAMS,
+            discard_overrides=None,
+            store=store,
+        )
+
+    store = storage.SessionStore.create("parity")
+    return {"heap": prep(None), "stored": prep(store), "store": store}
+
+
+@pytest.fixture(scope="module")
+def decomposed(store_prep: dict[str, Any]) -> DecomposeStepOutput:
+    """One decomposition of ``store_prep``'s heap preprocessing, with filters to apply."""
+    from muedit.decomp.core import decompose_step
+    from tests._synthetic_emg import STORE_PARAMS
+
+    out = decompose_step(
+        prep=store_prep["heap"], params=STORE_PARAMS, rng=np.random.default_rng(0), progress_cb=None
+    )
+    assert sum(f.shape[1] for f in out.mu_filters_by_window.values() if f.size), "no filters"
+    return out

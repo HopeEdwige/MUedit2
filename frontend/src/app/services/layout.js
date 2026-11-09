@@ -1,12 +1,10 @@
-import { renderActiveStage } from "../stages/lifecycle.js";
+/**
+ * The settings panel's open state and toggle icon, and the resize policy
+ * that redraws the visible stage when its canvases change size.
+ */
+import { positionStepIndicator } from "./navigation.js";
 
 /** @typedef {import("../context.js").App} App */
-
-/** @type {ReturnType<typeof setTimeout> | null} */
-let layoutRerenderTimer = null;
-/** @type {ReturnType<typeof setTimeout> | null} */
-let layoutSettleTimer = null;
-let layoutResizePolicyInitialized = false;
 
 /**
  * @param {App} app
@@ -23,7 +21,7 @@ export function setSettingsOpen(app, open) {
       next ? "true" : "false",
     );
   }
-  app.scheduleLayoutRerender(0);
+  app.scheduleLayoutRerender();
 }
 
 /** @param {App} app */
@@ -49,76 +47,44 @@ export function ensureSettingsToggleIcon(els) {
   svg.setAttribute("width", "24");
   svg.setAttribute("height", "24");
 
+  const rect = document.createElementNS(ns, "rect");
+  rect.setAttribute("x", "3.75");
+  rect.setAttribute("y", "3.75");
+  rect.setAttribute("width", "16.5");
+  rect.setAttribute("height", "16.5");
+  rect.setAttribute("rx", "2");
+  svg.appendChild(rect);
+
   const path = document.createElementNS(ns, "path");
   path.setAttribute("stroke-linecap", "round");
   path.setAttribute("stroke-linejoin", "round");
-  path.setAttribute("d", "M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5");
+  path.setAttribute("d", "M9.75 3.75v16.5");
   svg.appendChild(path);
   els.settingsToggleBtn.appendChild(svg);
 }
 
-// Only the visible stage is drawn: hidden stages are display:none, so their
-// canvases have no size, and entering a stage schedules its own redraw.
-/** @param {App} app */
-export function scheduleLayoutRerender(app, delay = 90) {
-  const rerenderPlotsForLayout = () => renderActiveStage(app);
-  if (layoutRerenderTimer) {
-    clearTimeout(layoutRerenderTimer);
-  }
-  layoutRerenderTimer = window.setTimeout(() => {
-    layoutRerenderTimer = null;
-    // Two-pass draw: one pass during active resize, one on next frame after layout settles.
-    window.requestAnimationFrame(() => {
-      rerenderPlotsForLayout();
-      window.requestAnimationFrame(() => rerenderPlotsForLayout());
-    });
-  }, delay);
-
-  if (layoutSettleTimer) {
-    clearTimeout(layoutSettleTimer);
-  }
-  // Final pass after CSS transitions / scrollbar changes are done.
-  layoutSettleTimer = window.setTimeout(
-    () => {
-      layoutSettleTimer = null;
-      window.requestAnimationFrame(() => rerenderPlotsForLayout());
-    },
-    Math.max(220, delay + 140),
-  );
-}
-
-/** @param {App} app */
+/**
+ * Redraw the visible stage whenever a canvas or the channel grid changes size.
+ * Hidden stages are display:none, so their canvases have no size, and
+ * entering a stage schedules its own redraw.
+ *
+ * @param {App} app
+ */
 export function initLayoutResizePolicy(app) {
   const { els } = app;
-  const scheduleLayoutRerender = app.scheduleLayoutRerender;
-  if (layoutResizePolicyInitialized) return;
-  layoutResizePolicyInitialized = true;
-
   const targets = [
-    els.workspace,
-    document.querySelector(".visual-panel"),
-    els.stageQc,
-    els.stageRun,
-    els.stageEdit,
-    ...document.querySelectorAll(
-      ".stage-run .run-kpis, .stage-run .progress-row, .stage-run .chart-card, .stage-run .mu-controls",
-    ),
-    document.querySelector(".edit-top-row"),
-    ...document.querySelectorAll(".stage-edit .edit-full"),
-    els.settingsPanel,
+    els.emgCanvas,
+    els.auxCanvas,
+    els.qcSection,
+    els.editPulseCanvas,
+    els.editDrCanvas,
+    els.editTimelineCanvas,
   ].filter((node) => node != null);
+  const resizeObserver = new ResizeObserver(() => app.scheduleLayoutRerender());
+  targets.forEach((node) => resizeObserver.observe(node));
 
-  if ("ResizeObserver" in window && targets.length) {
-    const resizeObserver = new ResizeObserver(() => {
-      scheduleLayoutRerender(0);
-    });
-    targets.forEach((node) => resizeObserver.observe(node));
-  }
-
-  window.addEventListener("resize", () => {
-    scheduleLayoutRerender(0);
-  });
-  window.addEventListener("orientationchange", () => {
-    scheduleLayoutRerender(0);
-  });
+  window.addEventListener("resize", () => positionStepIndicator(els));
+  window.addEventListener("orientationchange", () =>
+    positionStepIndicator(els),
+  );
 }

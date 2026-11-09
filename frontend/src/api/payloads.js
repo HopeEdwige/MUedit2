@@ -1,106 +1,107 @@
+/**
+ * Normalises backend JSON at the boundary: the preview payload, the
+ * `/qc/auto` and `/qc/segment` responses (regions become `Span`s) and a run's
+ * `done` summary. Malformed entries are dropped here.
+ */
 /** @typedef {import("../app/context.js").JsonObject} JsonObject */
 /** @typedef {import("../app/context.js").Span} Span */
 
 /**
- * A decomposition file as loaded for editing; fields beyond these pass through.
+ * A raw file's preview, as the page reads it; fields beyond these pass
+ * through. The overview and aux traces are not in it: they come from the
+ * upload as envelopes (`/series/*`).
  *
  * @typedef {JsonObject & {
- *   pulse_trains: number[][],
- *   pulse_trains_full: number[][],
- *   distime_all: number[][],
  *   grid_names: string[],
- *   mu_grid_index: number[],
- *   parameters: JsonObject,
- *   total_samples: number,
- *   fsamp: number | null,
- *   file_label: string,
- *   edit_signal_token: string,
- * }} EditLoadPayload
- */
-
-/**
- * A signal preview; fields beyond these pass through.
- *
- * @typedef {JsonObject & {
- *   mean_abs: number[],
- *   grid_mean_abs: number[][],
- *   grid_names: string[],
- *   rois: Span[],
  *   channel_means: number[][],
  *   coordinates: number[][][],
  *   metadata: JsonObject,
- *   muscle: string[],
- *   pulse_trains_full: number[][],
- *   pulse_trains_all: number[][],
- *   distime_all: number[][],
- *   mu_grid_index: number[],
- *   auxiliary: number[][],
- *   auxiliary_names: string[],
+ *   muscle_names: string[],
+ *   aux_names: string[],
  *   total_samples: number,
+ *   discard_channels: number[][],
  * }} PreviewPayload
  */
 
 /**
- * @param {unknown} value
- * @param {number} [fallback]
- * @returns {number}
- */
-function toFiniteNumber(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-/**
- * Regions (ROIs, artifact windows) arrive as `{start, end}` objects or as
- * `[start, end]` pairs; everything past this point uses `Span` objects only.
- * Regions with a non-finite bound are dropped.
+ * Artifact windows arrive as `[start, end]` pairs; everything past this
+ * point uses `Span` objects only. Regions with a non-finite bound are dropped.
  *
  * @param {unknown} regions
  * @returns {Span[]}
  */
-export function toSpans(regions) {
+function toSpans(regions) {
   if (!Array.isArray(regions)) return [];
   return regions
-    .map((r) => ({
-      start: Number(Array.isArray(r) ? r[0] : r?.start),
-      end: Number(Array.isArray(r) ? r[1] : r?.end),
-    }))
+    .filter(Array.isArray)
+    .map(([start, end]) => ({ start: Number(start), end: Number(end) }))
     .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.end));
 }
 
+export const SEGMENT_KINDS = /** @type {const} */ ([
+  "ramp",
+  "plateau",
+  "sinusoid",
+  "irregular",
+]);
+
 /**
- * @param {unknown} payload
- * @returns {EditLoadPayload}
+ * The segments of a `/qc/segment` response; one with an unknown kind or bounds is dropped.
+ *
+ * @param {unknown} segments
+ * @returns {import("../state/state.js").TargetSegment[]}
  */
-export function normalizeEditLoadPayload(payload) {
-  /** @type {JsonObject} */
-  const source = payload && typeof payload === "object" ? payload : {};
-  const distRaw = source.distime_all || source.distime || [];
+export function toSegments(segments) {
+  if (!Array.isArray(segments)) return [];
+  return segments
+    .map((s) => ({
+      start: Number(s?.start),
+      end: Number(s?.end),
+      kind: s?.kind,
+      direction:
+        s?.direction === "up" || s?.direction === "down" ? s.direction : null,
+      cycles: Array.isArray(s?.cycles)
+        ? s.cycles.map(Number).filter(Number.isFinite)
+        : [],
+      frequencyHz: Number.isFinite(s?.frequency_hz) ? s.frequency_hz : null,
+    }))
+    .filter(
+      (s) =>
+        SEGMENT_KINDS.includes(s.kind) &&
+        Number.isFinite(s.start) &&
+        Number.isFinite(s.end) &&
+        s.end > s.start,
+    );
+}
+
+/**
+ * A `/qc/auto` response: each grid's bad channels (null when absent) and the
+ * artifact windows found.
+ *
+ * @param {JsonObject} data
+ */
+export function toAutoQc(data) {
   return {
-    ...source,
-    pulse_trains: Array.isArray(source.pulse_trains) ? source.pulse_trains : [],
-    pulse_trains_full: Array.isArray(source.pulse_trains_full)
-      ? source.pulse_trains_full
-      : [],
-    distime_all: Array.isArray(distRaw)
-      ? distRaw.map((row) =>
-          Array.isArray(row)
-            ? row.map((v) => toFiniteNumber(v, NaN)).filter(Number.isFinite)
-            : [],
-        )
-      : [],
-    grid_names: Array.isArray(source.grid_names) ? source.grid_names : [],
-    mu_grid_index: Array.isArray(source.mu_grid_index)
-      ? source.mu_grid_index
-      : [],
-    parameters:
-      source.parameters && typeof source.parameters === "object"
-        ? source.parameters
-        : {},
-    total_samples: toFiniteNumber(source.total_samples, 0),
-    fsamp: source.fsamp ?? null,
-    file_label: String(source.file_label || ""),
-    edit_signal_token: String(source.edit_signal_token || ""),
+    badChannelsPerGrid: Array.isArray(data.bad_channels_per_grid)
+      ? data.bad_channels_per_grid
+      : null,
+    artifactRegions: toSpans(data.artifact_regions),
+  };
+}
+
+/**
+ * A `/qc/segment` response: the segments and the auxiliary channel they split.
+ *
+ * @param {JsonObject} data
+ */
+export function toSegmentation(data) {
+  return {
+    segments: toSegments(data.segments),
+    targetIndex: Number.isInteger(data.target_index)
+      ? Number(data.target_index)
+      : null,
+    targetName:
+      typeof data.target_name === "string" ? data.target_name : "Target",
   };
 }
 
@@ -111,37 +112,58 @@ export function normalizeEditLoadPayload(payload) {
 export function normalizePreviewPayload(payload) {
   /** @type {JsonObject} */
   const source = payload && typeof payload === "object" ? payload : {};
+  /** @type {number[][]} */
+  const channelMeans = Array.isArray(source.channel_means)
+    ? source.channel_means
+    : [];
+  /** @type {JsonObject} */
+  const metadata =
+    source.metadata && typeof source.metadata === "object"
+      ? source.metadata
+      : {};
+  const badPerGrid = metadata.bad_channels_per_grid;
   return {
     ...source,
-    mean_abs: Array.isArray(source.mean_abs) ? source.mean_abs : [],
-    grid_mean_abs: Array.isArray(source.grid_mean_abs)
-      ? source.grid_mean_abs
-      : [],
     grid_names: Array.isArray(source.grid_names) ? source.grid_names : [],
-    rois: toSpans(source.rois),
-    channel_means: Array.isArray(source.channel_means)
-      ? source.channel_means
-      : [],
+    channel_means: channelMeans,
     coordinates: Array.isArray(source.coordinates) ? source.coordinates : [],
-    metadata:
-      source.metadata && typeof source.metadata === "object"
-        ? source.metadata
-        : {},
-    muscle: Array.isArray(source.muscle) ? source.muscle : [],
-    pulse_trains_full: Array.isArray(source.pulse_trains_full)
-      ? source.pulse_trains_full
-      : [],
-    pulse_trains_all: Array.isArray(source.pulse_trains_all)
-      ? source.pulse_trains_all
-      : [],
-    distime_all: Array.isArray(source.distime_all) ? source.distime_all : [],
-    mu_grid_index: Array.isArray(source.mu_grid_index)
-      ? source.mu_grid_index
-      : [],
-    auxiliary: Array.isArray(source.auxiliary) ? source.auxiliary : [],
-    auxiliary_names: Array.isArray(source.auxiliary_names)
-      ? source.auxiliary_names
-      : [],
-    total_samples: toFiniteNumber(source.total_samples, 0),
+    metadata,
+    // A grid whose bad-channel list doesn't match its channels starts with none discarded.
+    discard_channels: channelMeans.map((cm, grid) => {
+      const bad = badPerGrid?.[grid];
+      return Array.isArray(bad) && bad.length === cm.length
+        ? bad.map((v) => (v === 1 ? 1 : 0))
+        : cm.map(() => 0);
+    }),
+    muscle_names: Array.isArray(source.muscle_names) ? source.muscle_names : [],
+    aux_names: Array.isArray(source.aux_names) ? source.aux_names : [],
+    total_samples: Number.isFinite(Number(source.total_samples))
+      ? Number(source.total_samples)
+      : 0,
   };
+}
+
+/**
+ * The finished run from its `done` event, with its units counted per grid.
+ *
+ * @param {JsonObject} summary The event's summary.
+ * @param {JsonObject | null | undefined} preview Its preview metadata.
+ * @returns {import("../decomp/live.js").RunSummary}
+ */
+export function toRunSummary(summary, preview) {
+  const nMu = Math.max(0, Number(summary.n_mu) || 0);
+  const muGridIndex = (
+    Array.isArray(preview?.mu_grid_index) ? preview.mu_grid_index : []
+  ).map((g) => Math.max(0, Number(g) || 0));
+  const ngrid = Math.max(
+    Array.isArray(summary.grid_names) ? summary.grid_names.length : 0,
+    muGridIndex.length ? Math.max(...muGridIndex) + 1 : 0,
+    nMu > 0 ? 1 : 0,
+  );
+  const nMuByGrid = new Array(ngrid).fill(0);
+  for (let mu = 0; mu < nMu; mu++) {
+    const g = muGridIndex[mu] ?? 0;
+    nMuByGrid[g < ngrid ? g : 0] += 1;
+  }
+  return { nMu, nMuByGrid, muGridIndex };
 }

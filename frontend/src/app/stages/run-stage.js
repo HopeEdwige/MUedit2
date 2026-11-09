@@ -1,28 +1,17 @@
+/**
+ * The run stage: its service (parameters, start availability, the stream,
+ * rendering and auto-save) and its event bindings.
+ */
 import {
   autoSaveRunDecomposition as autoSaveRunDecompositionFeature,
-  runDecomposition as runDecompositionFeature,
+  cancelDecomposition,
+  runDecomposition,
   handleStreamMessage as handleStreamMessageFeature,
 } from "../../decomp/run.js";
-import {
-  buildRunMuDropdownModel as buildRunMuDropdownModelFeature,
-  buildRunMuExplorerModel as buildRunMuExplorerModelFeature,
-} from "../../decomp/explorer.js";
-import {
-  renderMuDropdowns as renderMuDropdownsController,
-  renderMuExplorer as renderMuExplorerController,
-} from "../../view/explorer.js";
-import {
-  setRunCurrentMu,
-  setRunCurrentMuGrid,
-  setRunView,
-} from "../../state/actions.js";
-import { getRunMuIndicesForGrid } from "../../state/selectors.js";
-import {
-  DEFAULT_POSTPROCESS_MODE,
-  POSTPROCESS_MODES,
-  buildDecomposeParams,
-} from "../../decomp/params.js";
-import { drawSeries } from "../../view/plots.js";
+import { renderRunStage as renderRunStageFeature } from "../../view/run-live.js";
+import { buildDecomposeParams, postprocessMode } from "../../decomp/params.js";
+import { oncePerFrame } from "../../view/plots.js";
+import { isToggleOn, setupToggle } from "../../view/controls.js";
 
 /** @typedef {import("../context.js").App} App */
 /** @typedef {import("../context.js").RunStage} RunStage */
@@ -36,8 +25,13 @@ export function createRunStageService(app) {
 
   /** @type {RunStage["updateStartAvailability"]} */
   function updateStartAvailability() {
-    if (els.start) {
-      els.start.disabled = !state.file || state.isRunning;
+    const blocked = !state.file || state.isRunning;
+    for (const btn of [els.start, els.runAgainBtn]) {
+      if (btn) btn.disabled = blocked;
+    }
+    if (els.cancelRun) {
+      els.cancelRun.hidden = !state.isRunning;
+      els.cancelRun.disabled = false;
     }
   }
 
@@ -46,63 +40,29 @@ export function createRunStageService(app) {
     return buildDecomposeParams({
       niter: Number(els.niter?.value) || 150,
       nwindows: Number(els.nwindows?.value) || 1,
-      peelOn: app.isToggleOn(els.peelOffToggle),
-      postprocessMode: els.postprocessMode?.value || "windowed",
-      covOn: app.isToggleOn(els.covToggle),
-      peelWindow: Number(els.peelOffWindow?.value) || 25,
-      covVal: Number(els.covValue?.value) || 0.5,
-      silVal: Number(els.silValue?.value) || 0.9,
+      peelOffEnabled: isToggleOn(els.peelOffToggle),
+      postprocessMode: els.postprocessMode?.value,
+      covFilter: isToggleOn(els.covToggle),
+      peelOffWinMs: Number(els.peelOffWindow?.value) || 25,
+      covThr: Number(els.covValue?.value) || 0.5,
+      silThr: Number(els.silValue?.value) || 0.9,
       duplicatesthresh: Number(els.duplicatesthresh?.value) || 0.3,
     });
   }
 
-  /** @type {RunStage["getMuIndicesForGrid"]} */
-  function getMuIndicesForGrid(gridIdx) {
-    return getRunMuIndicesForGrid(state, gridIdx);
-  }
-
-  /** @type {RunStage["renderMuDropdowns"]} */
-  function renderMuDropdowns() {
-    const model = buildRunMuDropdownModelFeature({
-      state,
-      getMuIndicesForGrid,
+  /** @type {RunStage["renderRunStage"]} */
+  function renderRunStage() {
+    renderRunStageFeature(els, state.runLive, {
+      gridNames: state.gridNames || [],
+      now: Date.now(),
     });
-    const selectedGrid = model.selectedGrid ?? state.currentMuGrid ?? 0;
-    setRunCurrentMuGrid(state, selectedGrid, {
-      resetView: false,
-    });
-    const selectedMu = Number.isFinite(model.selectedMu)
-      ? model.selectedMu
-      : model.muOptions?.length
-        ? Number(model.muOptions[0].value)
-        : Number.isFinite(state.currentMu)
-          ? state.currentMu
-          : 0;
-    setRunCurrentMu(state, selectedMu, { resetView: false });
-    renderMuDropdownsController(els, model);
-  }
-
-  /** @type {RunStage["renderMuExplorer"]} */
-  function renderMuExplorer() {
-    renderMuDropdowns();
-    const model = buildRunMuExplorerModelFeature({
-      state,
-      fsamp: state.fsamp,
-    });
-    if (model.nextView) {
-      setRunView(state, model.nextView);
-      model.view = model.nextView;
-    }
-    renderMuExplorerController({ els, drawSeries }, model);
   }
 
   return {
-    getMuIndicesForGrid,
-    renderMuDropdowns,
-    renderMuExplorer,
+    renderRunStage,
+    scheduleRunRender: oncePerFrame(() => app.renderRunStage()),
     autoSaveRunDecomposition: () => autoSaveRunDecompositionFeature(app),
     handleStreamMessage: (msg) => handleStreamMessageFeature(app, msg),
-    runDecomposition: () => runDecompositionFeature(app),
     updateStartAvailability,
     buildParams,
   };
@@ -110,78 +70,32 @@ export function createRunStageService(app) {
 
 /** @param {App} app */
 export function setupRunEvents(app) {
-  const {
-    els,
-    state,
-    runDecomposition,
-    enableRoiSelection,
-    syncRois,
-    refreshVisuals,
-    setupToggle,
-    setupLockedOnToggle,
-    toggleConditional,
-    updateStartAvailability,
-    renderAuxiliaryChannels,
-    renderMuExplorer,
-    runAutoQc,
-    toggleArtifactMode,
-    removeLastArtifact,
-  } = app;
+  const { els } = app;
 
-  els.start?.addEventListener("click", runDecomposition);
-  els.qcAutoBtn?.addEventListener("click", runAutoQc);
-  els.artifactAddBtn?.addEventListener("click", toggleArtifactMode);
-  els.artifactRemoveBtn?.addEventListener("click", removeLastArtifact);
-  refreshVisuals();
+  const run = () => void runDecomposition(app);
+  els.start?.addEventListener("click", run);
+  els.runAgainBtn?.addEventListener("click", run);
+  els.cancelRun?.addEventListener("click", () => void cancelDecomposition(app));
+  els.runRetrySaveBtn?.addEventListener("click", () => {
+    void app.autoSaveRunDecomposition();
+  });
 
-  enableRoiSelection("emgCanvas");
-
-  if (els.nwindows) {
-    els.nwindows.addEventListener("change", () => {
-      const nwin = Number(els.nwindows.value) || 1;
-      syncRois(nwin);
-      refreshVisuals();
-      els.nwindows.blur();
-    });
-  }
-
-  setupToggle(els.peelOffToggle, (on) =>
-    toggleConditional("peelOffSettings", on),
-  );
+  setupToggle(els.peelOffToggle, (on) => {
+    if (els.peelOffSettings) els.peelOffSettings.hidden = !on;
+  });
   const renderPostprocessHint = () => {
     if (!els.postprocessModeHint) return;
-    const mode =
-      POSTPROCESS_MODES[els.postprocessMode?.value] ||
-      POSTPROCESS_MODES[DEFAULT_POSTPROCESS_MODE];
-    els.postprocessModeHint.textContent = mode.hint;
+    els.postprocessModeHint.textContent = postprocessMode(
+      els.postprocessMode?.value,
+    ).hint;
   };
   renderPostprocessHint();
   els.postprocessMode?.addEventListener("change", () => {
     renderPostprocessHint();
     els.postprocessMode.blur();
   });
-  setupToggle(els.covToggle, (on) => toggleConditional("covSettings", on));
-  setupLockedOnToggle(els.silToggle, (on) =>
-    toggleConditional("silSettings", on),
-  );
-  updateStartAvailability();
-
-  els.auxSelector?.addEventListener("change", () => {
-    renderAuxiliaryChannels();
-    els.auxSelector.blur();
+  setupToggle(els.covToggle, (on) => {
+    if (els.covSettings) els.covSettings.hidden = !on;
   });
-
-  els.muGridSelect?.addEventListener("change", () => {
-    const idx = Number(els.muGridSelect.value) || 0;
-    setRunCurrentMuGrid(state, idx, { resetView: true });
-    renderMuExplorer();
-    els.muGridSelect.blur();
-  });
-
-  els.muSelect?.addEventListener("change", () => {
-    const idx = Number(els.muSelect.value);
-    setRunCurrentMu(state, idx, { resetView: true });
-    renderMuExplorer();
-    els.muSelect.blur();
-  });
+  app.updateStartAvailability();
 }

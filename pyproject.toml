@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "muedit"
-version = "2.1.0"
+version = "2.2.1"
 description = "FastICA-based Motor Unit decomposition of High-Density EMG signals"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -25,7 +25,6 @@ classifiers = [
 dependencies = [
   "numpy>=2.4",
   "scipy>=1.17",
-  "matplotlib>=3.9",
   "xmltodict>=0.14",
   "pydantic>=2.10",
   "PyYAML>=6.0",
@@ -33,8 +32,8 @@ dependencies = [
   "fastapi>=0.141",
   "starlette>=1.3.1",  # imported directly; floor clears known advisories
   "uvicorn>=0.32",
-  "python-multipart>=0.0.31",  # floor clears known advisories
   "pyedflib>=0.1.36",
+  "platformdirs>=4.3",
 ]
 
 [project.optional-dependencies]
@@ -43,11 +42,15 @@ dev = [
   "twine>=5.1",
   "pytest>=8.3",
   "pytest-cov>=6.0",
-  "httpx>=0.27",  # FastAPI TestClient backend (tests/test_api_http.py)
+  "httpx>=0.27",  # FastAPI TestClient backend (the tests/test_api_*.py)
   "ruff==0.15.16",  # keep in sync with the rev in .pre-commit-config.yaml
   "mypy==2.3.1",
   "pre-commit>=4.0",
   "types-PyYAML",
+]
+# Only the CLI's ``--manual-roi`` plots; the app never imports matplotlib.
+plot = [
+  "matplotlib>=3.9",
 ]
 notebook = [
   "jupyterlab>=4.6.2",  # floor clears known advisories
@@ -55,11 +58,11 @@ notebook = [
 ]
 research = [
   "optuna>=4.3",
+  "matplotlib>=3.9",
 ]
 
 [project.scripts]
-muedit-api = "muedit.cli:serve_api"
-muedit-decompose = "muedit.cli:run_decomposition_cli"
+muedit = "muedit.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "python/src"}
@@ -88,10 +91,12 @@ addopts = ["-ra", "--strict-markers"]
 # CI runs ``-m "not data"``: runners have no recordings under data/.  That
 # tier is also the fast one (~1.5 min), since the decomposition benchmark and
 # simulation tests all need recordings.  Run everything locally with a plain
-# ``pytest``.  conftest.py applies ``data`` to any test that depends on a
-# sample-file fixture, so it never needs hand-marking.
+# ``pytest``.  conftest.py applies ``data`` to any test that declares a
+# sample-file fixture; a test that fetches one with ``request.getfixturevalue``
+# is invisible to that and marks its cases by hand
+# (``pytest.param(..., marks=pytest.mark.data)``).
 markers = [
-  "data: needs git-ignored sample recordings under data/ (auto-applied)",
+  "data: needs git-ignored sample recordings under data/ (auto-applied to declared fixtures)",
 ]
 
 [tool.ruff]

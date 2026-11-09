@@ -1,28 +1,21 @@
+/**
+ * BIDS naming without DOM: entity labels and tokens, suggested file names,
+ * and the muscle rows of the session form.
+ */
 import { inferGridCount, normalizeGridNames } from "./grid.js";
 
-/** @typedef {import("../app/state.js").State} State */
-/** @typedef {import("../app/state.js").FileRef} FileRef */
-/** @typedef {import("../app/context.js").JsonObject} JsonObject */
+/** @typedef {import("../state/state.js").State} State */
 
-/** @typedef {ReturnType<typeof buildBidsAutoInfoModel>} BidsAutoInfoModel */
 /** @typedef {ReturnType<typeof buildBidsMuscleRowsModel>} BidsMuscleRows */
-/** @typedef {ReturnType<typeof buildSessionInfoFromDecomposition>} SessionInfo */
-/** @typedef {{ age?: string | null, sex?: string | null, handedness?: string | null }} ParticipantFields */
 
 /** @typedef {ReturnType<typeof parseBidsEntitiesFromLabel>} BidsEntities */
-
-/**
- * @typedef {object} SessionInfoDeps
- * @property {typeof parseBidsEntitiesFromLabel} parseBidsEntitiesFromLabel
- * @property {typeof listifyMuscles} listifyMuscles
- */
 
 /**
  * @param {string | null | undefined} value
  * @param {string} [fallback]
  * @returns {string}
  */
-function safeBidsToken(value, fallback = "") {
+export function safeBidsToken(value, fallback = "") {
   const token = String(value || "")
     .trim()
     .replace(/[^A-Za-z0-9]+/g, "");
@@ -37,31 +30,41 @@ export function buildEntityLabelFromSession({
   task,
   session,
   run,
-  acq,
+  acquisition,
 } = {}) {
   // Emit entities in canonical BIDS order: sub, ses, task, acq, run.
   // run/acq are added only when provided so sequential recordings
   // keyed by acq-<label> are not stamped with a spurious run-01.
   const parts = [`sub-${safeBidsToken(subject, "01")}`];
-  const ses = safeBidsToken(session, "");
+  const ses = safeBidsToken(session);
   if (ses) parts.push(`ses-${ses}`);
   parts.push(`task-${safeBidsToken(task, "task")}`);
-  const a = safeBidsToken(acq, "");
-  if (a) parts.push(`acq-${a}`);
-  const r = safeBidsToken(run, "");
+  const acq = safeBidsToken(acquisition);
+  if (acq) parts.push(`acq-${acq}`);
+  const r = safeBidsToken(run);
   if (r) parts.push(`run-${r}`);
   return parts.join("_");
 }
 
 /**
- * @param {string | null | undefined} baseName
- * @param {string} [suffix]
+ * @param {string} baseName
+ * @param {string} suffix
  * @returns {string}
  */
-export function getSuggestedNpzName(baseName, suffix = "_edited") {
-  let stem = String(baseName || "decomposition").replace(/\.[^.]+$/, "");
-  if (suffix && stem.endsWith(suffix)) stem = stem.slice(0, -suffix.length);
+export function getSuggestedNpzName(baseName, suffix) {
+  let stem = baseName.replace(/\.[^.]+$/, "");
+  if (stem.endsWith(suffix)) stem = stem.slice(0, -suffix.length);
   return `${stem}${suffix}.npz`;
+}
+
+/**
+ * The entity label of a BIDS recording's file name: its stem without `_emg`.
+ *
+ * @param {string} filename
+ * @returns {string}
+ */
+export function entityLabelFromFilename(filename) {
+  return filename.replace(/\.[^.]+$/, "").replace(/_emg$/i, "");
 }
 
 /**
@@ -77,51 +80,8 @@ export function parseBidsEntitiesFromLabel(label) {
     subject: get("sub"),
     session: get("ses"),
     task: get("task"),
-    acq: get("acq"),
+    acquisition: get("acq"),
     run: get("run"),
-  };
-}
-
-/**
- * @param {string | (string | null | undefined)[] | null | undefined} value
- * @returns {string[]}
- */
-export function listifyMuscles(value) {
-  if (Array.isArray(value))
-    return value.map((v) => String(v || "").trim()).filter(Boolean);
-  if (typeof value === "string" && value.trim()) return [value.trim()];
-  return [];
-}
-
-/**
- * @param {State} state
- */
-export function buildBidsAutoInfoModel(state) {
-  const meta = state.metadata || {};
-  const muscles = Array.isArray(state.muscle) ? state.muscle : [];
-  const hasMeta =
-    !!meta.hardware_filters ||
-    !!meta.gains ||
-    muscles.length > 0 ||
-    !!meta.device_name;
-  if (!hasMeta) {
-    return { hidden: true };
-  }
-
-  const uniqueMuscles = [
-    ...new Set(muscles.filter((m) => m && typeof m === "string" && m.trim())),
-  ];
-  const hpf = Array.isArray(meta.emg_hpf) ? meta.emg_hpf[0] : meta.emg_hpf;
-  const lpf = Array.isArray(meta.emg_lpf) ? meta.emg_lpf[0] : meta.emg_lpf;
-  const gain = Array.isArray(meta.gains) ? meta.gains[0] : meta.gains;
-
-  return {
-    hidden: false,
-    manufacturer: meta.manufacturer || "",
-    deviceName: meta.device_name || "",
-    musclesText: uniqueMuscles.length ? uniqueMuscles.join(", ") : "",
-    filtersText: hpf || lpf ? `${hpf || "n/a"} - ${lpf || "n/a"} Hz` : "",
-    gainText: gain ? String(gain) : "",
   };
 }
 
@@ -130,37 +90,20 @@ export function buildBidsAutoInfoModel(state) {
  */
 export function buildBidsMuscleRowsModel(state) {
   const inEditStage = state.currentStage === "edit";
-  const editGridNames =
-    Array.isArray(state.edit?.gridNames) && state.edit.gridNames.length
-      ? state.edit.gridNames
-      : [];
-  const runGridNames =
-    Array.isArray(state.gridNames) && state.gridNames.length
-      ? state.gridNames
-      : [];
-
-  let gridNames;
-  if (inEditStage) {
-    gridNames = editGridNames.length ? editGridNames : ["Grid 1"];
-  } else if (editGridNames.length) {
-    gridNames = editGridNames;
-  } else {
-    gridNames = runGridNames.length ? runGridNames : ["Grid 1"];
-  }
-
-  const muscles = Array.isArray(state.muscle) ? state.muscle : [];
+  // An open edit session's grids are `state.gridNames`; the edit stage has none without one.
+  const gridNames = normalizeGridNames(
+    inEditStage && !state.edit.token ? [] : state.gridNames,
+  );
+  const { muscleNames } = state;
   const rowCount = inferGridCount({
     gridNames,
-    muGridIndex: inEditStage ? state.edit?.muGridIndex : [],
-    muscles,
-  });
-  const normalizedGridNames = normalizeGridNames(gridNames, {
-    minimumCount: rowCount,
+    muGridIndex: inEditStage ? state.edit.muGridIndex : [],
+    muscleNames,
   });
   return Array.from({ length: rowCount }, (_, i) => ({
     id: `bidsMuscle_${i}`,
-    label: `Muscle Grid ${i + 1}${normalizedGridNames[i] ? ` (${normalizedGridNames[i]})` : ""}`,
-    value: muscles[i] || "",
+    label: `Muscle Grid ${i + 1}`,
+    value: muscleNames[i] || "",
   }));
 }
 
@@ -170,46 +113,4 @@ export function buildBidsMuscleRowsModel(state) {
  */
 export function naToEmpty(v) {
   return !v || v === "n/a" ? "" : v;
-}
-
-/**
- * @param {FileRef | null | undefined} file
- * @param {JsonObject | null | undefined} data
- * @param {SessionInfoDeps} deps
- */
-export function buildSessionInfoFromDecomposition(file, data, deps) {
-  const { parseBidsEntitiesFromLabel, listifyMuscles } = deps;
-  const fileLabel = file?.name || data?.file_label || "decomposition";
-  const fs = Number(data?.fsamp);
-  const entities = parseBidsEntitiesFromLabel(fileLabel);
-
-  const fromParams = data?.parameters?.target_muscle;
-  const fromPayload = data?.muscle;
-  const muscles = listifyMuscles(fromPayload).length
-    ? listifyMuscles(fromPayload)
-    : listifyMuscles(fromParams);
-
-  const participant = data?.participant_meta || {};
-
-  return {
-    fileLabel,
-    fsampText: Number.isFinite(fs) && fs > 0 ? String(Math.round(fs)) : "",
-    entities,
-    muscles,
-    participant: {
-      age: naToEmpty(participant.age),
-      sex: naToEmpty(participant.sex),
-      handedness: naToEmpty(participant.handedness),
-    },
-    hardware: {
-      manufacturer: data?.manufacturer || "",
-      deviceModel: data?.manufacturers_model_name || "",
-    },
-    bids: {
-      powerlineFreq: data?.powerline_freq ?? "",
-      placementScheme: data?.placement_scheme ?? "",
-      placementDescription: data?.placement_scheme_description ?? "",
-      softwareVersions: data?.software_versions ?? null,
-    },
-  };
 }

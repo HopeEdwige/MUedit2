@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from muedit.decomp.pipeline import run_decomposition
-from muedit.decomp.types import DecompositionParameters
-from muedit.io.factory import load_signal, register_loader
+import importlib.metadata
 
-__all__ = [
-    "DecompositionParameters",
-    "load_signal",
-    "register_loader",
-    "run_decomposition",
-]
+
+def installed_version() -> str | None:
+    """The installed MUedit version, or ``None`` when the package metadata is missing."""
+    try:
+        return importlib.metadata.version("muedit")
+    except importlib.metadata.PackageNotFoundError:
+        return None

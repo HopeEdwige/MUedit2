@@ -1,90 +1,90 @@
+/**
+ * Starting, streaming, cancelling and auto-saving a decomposition run.
+ * Stream events are applied by `handleStreamMessage` through `live.js`.
+ */
 import {
-  ensureDiscardMasks,
-  setAuxData,
-  setChannelMeans,
-  setChannelTraces,
-  setCoordinates,
-  setGridNames,
-  setGridSeries,
   setIsRunning,
-  setLastRunDownloadKey,
-  setMetadata,
-  setMuPreviewData,
-  setMuscle,
+  setSavedRunToken,
   setParameters,
-  setPreviewSeries,
-  setRois,
-  setRunDownloadInFlight,
-  setSeriesLength,
-  setUploadToken,
+  setRunLive,
+  setRunResultToken,
 } from "../state/actions.js";
-import { getCurrentGrid, roiStart, roiEnd } from "../state/selectors.js";
-import { normalizePreviewPayload } from "../api/payloads.js";
 import { getSuggestedNpzName } from "../io/bids.js";
-import { drawGridOverlay } from "../view/plots.js";
-import { errorMessage } from "../app/services/error-service.js";
+import { errorMessage, handleError } from "../app/services/error-service.js";
+import {
+  applyRunEvent,
+  createRunLive,
+  failRun,
+  failSave,
+  finishRun,
+  finishSave,
+  startSave,
+} from "./live.js";
+import { renderRunTime, updateRunDots } from "../view/run-live.js";
+import { readNdjson } from "../api/ndjson.js";
+import { toRunSummary } from "../api/payloads.js";
+import { withUpload } from "../app/services/upload.js";
 
 /** @typedef {import("../app/context.js").App} App */
 /** @typedef {import("../app/context.js").JsonObject} JsonObject */
-/** @typedef {import("../api/payloads.js").PreviewPayload} PreviewPayload */
+
+/** How often the elapsed time and estimate refresh during a run. */
+const CLOCK_TICK_MS = 1000;
+/** How long a run may take to start streaming. */
+const RUN_START_TIMEOUT_MS = 15 * 60 * 1000;
 
 /** @param {App} app */
 export async function autoSaveRunDecomposition(app) {
   const {
     state,
-    persistNpzBySaveTarget,
+    saveRun,
     getBidsMuscleNames,
     setStatus,
     loadDecompositionForEditByPath,
+    renderRunStage,
   } = app;
+  const live = state.runLive;
 
-  if (state.runDownloadInFlight) return;
-  if (!state.muDistimes?.length) return;
+  if (!live?.summary?.nMu || live.saving) return;
+  // The server kept this run's pulse trains and discharge times under its token.
+  const token = state.runResultToken;
+  if (!token || state.savedRunToken === token) return;
   const fileBase = state.file?.name || "decomposition";
   const suggestedName = getSuggestedNpzName(fileBase, "_decomposition");
-  const key = `${suggestedName}:${state.muDistimes.length}:${state.seriesLength || 0}`;
-  if (state.lastRunDownloadKey === key) return;
 
-  const muscleNames = getBidsMuscleNames();
-  const totalSamples =
-    state.seriesLength ||
-    (state.muPulseTrains?.[0]?.length ?? 0) ||
-    Math.max(
-      0,
-      ...state.muDistimes.flatMap((d) => (d || []).map((v) => Number(v) || 0)),
-    ) + 1;
-  const fs = state.fsamp;
   const payload = {
-    distimes: state.muDistimes || [],
-    pulse_trains: state.muPulseTrains || [],
-    total_samples: totalSamples,
-    fsamp: fs != null && Number.isFinite(fs) && fs > 0 ? fs : null,
-    grid_names: state.gridNames || ["Grid 1"],
-    mu_grid_index: state.muGridIndex || [],
+    run_result_token: token,
+    total_samples: state.totalSamples || 0,
+    fsamp: state.fsamp,
+    grid_names: state.gridNames,
+    mu_grid_index: live.summary.muGridIndex,
     parameters: state.parameters || {},
-    muscle: muscleNames,
-    artifact_regions: state.artifactRegions || [],
+    muscle_names: getBidsMuscleNames(),
+    artifact_regions: state.artifactRegions,
     file_label: suggestedName,
   };
-  setRunDownloadInFlight(state, true);
+  startSave(live);
+  renderRunStage();
   try {
     setStatus("Saving decomposition...", "muted");
-    const saved = await persistNpzBySaveTarget(payload, suggestedName);
-    setLastRunDownloadKey(state, key);
+    const saved = await saveRun(payload, suggestedName);
+    setSavedRunToken(state, token);
+    finishSave(live, saved.path);
     setStatus(
-      saved?.path
+      saved.path
         ? `Decomposition saved to ${saved.path}`
         : "Decomposition saved",
       "success",
     );
-    if (saved?.path) {
-      loadDecompositionForEditByPath(saved.path);
+    // Preloaded for the Edit step; the page stays on the run's result.
+    if (saved.path) {
+      void loadDecompositionForEditByPath(saved.path, { open: false });
     }
   } catch (err) {
-    console.error(err);
-    setStatus(`Save failed: ${errorMessage(err)}`, "error");
+    handleError(err, setStatus, "Save failed");
+    failSave(live, errorMessage(err));
   } finally {
-    setRunDownloadInFlight(state, false);
+    renderRunStage();
   }
 }
 
@@ -99,8 +99,9 @@ export async function runDecomposition(app) {
     updateStartAvailability,
     switchStage,
     setStatus,
-    updateProgress,
     handleStreamMessage,
+    renderRunStage,
+    checkSessionForm,
   } = app;
 
   if (state.isRunning) {
@@ -111,98 +112,69 @@ export async function runDecomposition(app) {
     setStatus("Select an EMG data file first", "error");
     return;
   }
+  if (!checkSessionForm()) {
+    setStatus("Fill in the session info marked in red", "error");
+    return;
+  }
 
   setIsRunning(state, true);
+  const params = buildParams();
+  setParameters(state, params);
+  setRunResultToken(state, "");
+  setRunLive(state, createRunLive(Date.now()));
   updateStartAvailability();
   switchStage("run");
-  setParameters(state, buildParams());
-  setMuPreviewData(state, [], [], []);
-  setLastRunDownloadKey(state, "");
-
+  renderRunStage();
   setStatus("Running decomposition...", "muted");
-  updateProgress(5, "Starting decomposition");
+  const clock = globalThis.setInterval(
+    () => renderRunTime(app.els, state.runLive, Date.now()),
+    CLOCK_TICK_MS,
+  );
 
-  const buildRunFormData = () => {
-    const formData = new FormData();
-    formData.append("upload_token", state.uploadToken || "");
-
-    formData.append("params", JSON.stringify(buildParams()));
-    formData.append("persist_output", "false");
-    if (state.discardMasks && state.discardMasks.length) {
-      formData.append("discard_channels", JSON.stringify(state.discardMasks));
-    }
-    if (state.rois && state.rois.length) {
-      formData.append("rois", JSON.stringify(state.rois));
-    }
-    if (state.artifactRegions && state.artifactRegions.length) {
-      formData.append(
-        "artifact_regions",
-        JSON.stringify(state.artifactRegions),
-      );
-    }
-
-    const project = String(getBidsProject() || "").trim();
-    if (project) {
-      formData.append("project", project);
-    }
+  const buildRunPayload = (/** @type {string} */ token) => {
     const bidsEntities = collectBidsEntities();
-    if (Object.keys(bidsEntities).length) {
-      formData.append("bids_entities", JSON.stringify(bidsEntities));
-    }
-
-    formData.append("bids_export", "true");
-    formData.append("full_preview", "true");
-    return formData;
+    return {
+      upload_token: token,
+      params,
+      discard_channels: state.discardChannels.length
+        ? state.discardChannels
+        : null,
+      rois: state.rois.length ? state.rois : null,
+      artifact_regions: state.artifactRegions.length
+        ? state.artifactRegions
+        : null,
+      // The backend segments the same channel again to write the target's events.
+      target_index:
+        state.segments.length && state.targetIndex !== null
+          ? state.targetIndex
+          : null,
+      project: getBidsProject() || null,
+      bids_entities: Object.keys(bidsEntities).length ? bidsEntities : null,
+    };
   };
 
   try {
-    let response;
-    try {
-      response = await api.decomposeStream(buildRunFormData(), 15 * 60 * 1000);
-    } catch (err) {
-      const message = errorMessage(err);
-      const sourcePath = state.file?.path;
-      if (!message.includes("upload_token") || !sourcePath) throw err;
-      setUploadToken(state, null);
-      updateProgress(5, "Session expired, reloading file...");
-      const preview = await api.fetchPreviewByPath(sourcePath);
-      if (!preview?.upload_token) throw err;
-      setUploadToken(state, preview.upload_token);
-      updateProgress(5, "Starting decomposition");
-      response = await api.decomposeStream(buildRunFormData(), 15 * 60 * 1000);
-    }
+    const response = await withUpload(app, (token) =>
+      api.decomposeStream(buildRunPayload(token), RUN_START_TIMEOUT_MS),
+    );
+    // A reloaded file reported itself on the status line.
+    setStatus("Running decomposition...", "muted");
 
     if (!response.body) {
       throw new Error("No response body");
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
     let malformedEvents = 0;
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          handleStreamMessage(JSON.parse(line));
-        } catch (e) {
-          console.warn("Dropped malformed stream event", e);
-          malformedEvents += 1;
-        }
-      }
-    }
-    if (buffer.trim()) {
+    /** @param {unknown} err */
+    const dropEvent = (err) => {
+      console.warn("Dropped malformed stream event", err);
+      malformedEvents += 1;
+    };
+    for await (const msg of readNdjson(response.body, dropEvent)) {
       try {
-        handleStreamMessage(JSON.parse(buffer));
-      } catch (e) {
-        console.warn("Dropped malformed final stream event", e);
-        malformedEvents += 1;
+        handleStreamMessage(msg);
+      } catch (err) {
+        dropEvent(err);
       }
     }
     if (malformedEvents > 0) {
@@ -211,126 +183,37 @@ export async function runDecomposition(app) {
         "muted",
       );
     }
+    // A stream that ends without `done`, `error` or `cancelled` left the run unfinished.
+    if (state.runLive?.status === "running") {
+      failRun(
+        state.runLive,
+        "The decomposition stopped without a result",
+        Date.now(),
+      );
+    }
   } catch (err) {
-    console.error(err);
-    setStatus(`Error: ${errorMessage(err)}`, "error");
-    updateProgress(0, "Run failed. Check console for details.", "error");
+    handleError(err, setStatus, "Error");
+    if (state.runLive) failRun(state.runLive, errorMessage(err), Date.now());
   } finally {
+    globalThis.clearInterval(clock);
     setIsRunning(state, false);
     updateStartAvailability();
+    renderRunStage();
   }
 }
 
-/**
- * @param {App} app
- * @param {PreviewPayload} preview
- * @param {{ skipMuData?: boolean }} [options]
- */
-function applyPreviewData(app, preview, options = {}) {
-  const {
-    state,
-    els,
-    renderChannelQC,
-    requestQcGridWindow,
-    showWorkspace,
-    renderMuExplorer,
-    renderBidsAutoInfo,
-    renderBidsMuscleFields,
-    populateAuxSelector,
-    renderAuxiliaryChannels,
-    enableRoiSelection,
-  } = app;
-  const { skipMuData = false } = options;
-
-  const {
-    mean_abs,
-    total_samples,
-    grid_mean_abs,
-    grid_names,
-    rois,
-    channel_means,
-    coordinates,
-    metadata,
-    muscle,
-    pulse_trains_full,
-    pulse_trains_all,
-    distime_all,
-    mu_grid_index,
-    auxiliary,
-    auxiliary_names,
-  } = preview;
-
-  if (total_samples) {
-    setSeriesLength(state, total_samples);
-  }
-  if (rois.length) {
-    setRois(state, rois);
-    if (els.nwindows) els.nwindows.value = String(state.rois.length);
-  }
-  if (grid_mean_abs && grid_names) {
-    setGridSeries(state, grid_mean_abs);
-    setGridNames(state, grid_names);
-  }
-  if (channel_means) {
-    setChannelMeans(state, channel_means);
-  }
-  if (coordinates) {
-    setCoordinates(state, coordinates);
-  }
-  setChannelTraces(state, []);
-  if (metadata) {
-    setMetadata(state, metadata);
-  }
-  if (muscle) {
-    setMuscle(state, muscle);
-  }
-  if (!skipMuData) {
-    const newPulseTrains =
-      pulse_trains_full && pulse_trains_full.length
-        ? pulse_trains_full
-        : pulse_trains_all || state.muPulseTrains;
-    const newDistimes = distime_all || state.muDistimes;
-    const newGridIndex = mu_grid_index || state.muGridIndex;
-    setMuPreviewData(state, newPulseTrains, newDistimes, newGridIndex);
-  }
-  if (auxiliary) {
-    setAuxData(state, auxiliary, auxiliary_names || []);
-    populateAuxSelector();
-    renderAuxiliaryChannels();
-    enableRoiSelection("auxCanvas");
-  }
-  ensureDiscardMasks(state);
-  renderChannelQC();
-  const roiStream = state.rois?.[0];
-  requestQcGridWindow(
-    getCurrentGrid(state),
-    roiStart(roiStream),
-    roiEnd(roiStream, state.seriesLength),
-  );
-  setPreviewSeries(state, mean_abs);
-  drawGridOverlay(
-    els.emgCanvas,
-    state.gridSeries,
-    state.gridColors,
-    state.rois,
-    state.seriesLength,
-  );
-  showWorkspace();
-  renderMuExplorer();
-  renderBidsAutoInfo();
-  renderBidsMuscleFields();
-}
-
-/**
- * @param {{ api: App["api"], token: string, applyPreview: (preview: JsonObject) => void, onError: (err: unknown) => void }} deps
- */
-async function hydrateBinaryDecomposePreview(deps) {
-  const { api, token, applyPreview, onError } = deps;
+/** @param {App} app */
+export async function cancelDecomposition(app) {
+  const { state, els, api, setStatus } = app;
+  if (!state.isRunning) return;
+  if (els.cancelRun) els.cancelRun.disabled = true;
   try {
-    const preview = await api.fetchDecomposePreview(token);
-    applyPreview(preview);
+    // The run's stream ends with a `cancelled` event, which resets the page.
+    await api.cancelDecomposition();
+    setStatus("Cancelling decomposition...", "muted");
   } catch (err) {
-    onError(err);
+    handleError(err, setStatus, "Cancel failed");
+    if (els.cancelRun) els.cancelRun.disabled = false;
   }
 }
 
@@ -341,101 +224,55 @@ async function hydrateBinaryDecomposePreview(deps) {
 export function handleStreamMessage(app, msg) {
   const {
     state,
-    els,
-    api,
     setStatus,
-    updateProgress,
-    renderMuExplorer,
+    renderRunStage,
+    scheduleRunRender,
     autoSaveRunDecomposition,
+    updateStepAvailability,
+    switchStage,
   } = app;
-
-  let pendingAutoSave = false;
+  const live = state.runLive;
+  if (!live) return;
 
   if (msg.stage === "error") {
-    const detail = msg.detail
-      ? `: ${typeof msg.detail === "string" ? msg.detail : JSON.stringify(msg.detail)}`
-      : "";
+    const detail = msg.detail ? `: ${msg.detail}` : "";
     setStatus(`Error${detail}`, "error");
-    updateProgress(0, msg.message || "Run failed", msg.stage);
+    failRun(live, `${msg.message || "Run failed"}${detail}`, Date.now());
+    renderRunStage();
     return;
   }
 
-  if (msg.pct !== undefined) {
-    updateProgress(msg.pct, msg.message || "", msg.stage);
-  } else if (msg.message) {
-    updateProgress(undefined, msg.message, msg.stage);
+  if (msg.stage === "cancelled") {
+    setStatus("Decomposition cancelled", "muted");
+    setRunLive(state, null);
+    // The run page is empty without a run; QC is where the next one starts.
+    if (state.currentStage === "run") switchStage("qc");
+    else updateStepAvailability();
+    return;
   }
 
-  if (msg.preview) {
-    if (msg.preview.preview_binary_token && api) {
-      const previewNoToken = { ...msg.preview };
-      delete previewNoToken.preview_binary_token;
-      applyPreviewData(app, normalizePreviewPayload(previewNoToken), {
-        skipMuData: true,
-      });
-      void hydrateBinaryDecomposePreview({
-        api,
-        token: msg.preview.preview_binary_token,
-        applyPreview: (previewPayload) => {
-          applyPreviewData(app, normalizePreviewPayload(previewPayload));
-          if (pendingAutoSave) {
-            renderMuExplorer();
-            void autoSaveRunDecomposition();
-          }
-        },
-        onError: (err) => {
-          console.error(err);
-          setStatus("Preview hydration failed", "error");
-        },
-      });
-    } else {
-      applyPreviewData(app, normalizePreviewPayload(msg.preview));
-    }
+  // Progress events can arrive faster than frames: the dots they change are
+  // restyled now, and the rest of the page once per frame.
+  const change = applyRunEvent(live, msg, Date.now());
+  if (change) updateRunDots(app.els, live, change);
+
+  if (msg.stage !== "done") {
+    if (change || msg.phase) scheduleRunRender();
+    return;
   }
 
-  if (msg.summary) {
-    const { mu_count, grid_names, parameters } = msg.summary;
-    const totalMu = Number.isFinite(mu_count)
-      ? mu_count
-      : state.muDistimes?.length || 0;
-    const gridNames = Array.isArray(grid_names) ? grid_names : [];
-    const previewMapping = Array.isArray(msg.preview?.mu_grid_index)
-      ? msg.preview.mu_grid_index
-      : [];
-    const stateMapping = Array.isArray(state.muGridIndex)
-      ? state.muGridIndex
-      : [];
-    const mapping = previewMapping.length ? previewMapping : stateMapping;
-    const gridCount = Math.max(
-      gridNames.length,
-      mapping.length
-        ? Math.max(
-            ...mapping.map((/** @type {number} */ v) => Number(v) || 0),
-          ) + 1
-        : 0,
-      totalMu > 0 ? 1 : 0,
-    );
-    const counts = new Array(gridCount).fill(0);
-    for (let idx = 0; idx < totalMu; idx++) {
-      const g = Number(mapping[idx]);
-      const gridIdx = Number.isFinite(g) && g >= 0 && g < gridCount ? g : 0;
-      counts[gridIdx] += 1;
-    }
-    const perGrid = counts.map((n, idx) => `Grid ${idx + 1}: ${n} MU`);
-    const summaryText = `${perGrid.join(" • ")}${perGrid.length ? " • " : ""}Total: ${totalMu} MU`;
-    if (els.progressText) els.progressText.textContent = summaryText;
-    if (parameters) {
-      setParameters(state, parameters);
-    }
-  }
-
-  if (msg.stage === "done") {
-    if (Array.isArray(state.muPulseTrains) && state.muPulseTrains.length) {
-      renderMuExplorer();
-      void autoSaveRunDecomposition();
-    } else {
-      pendingAutoSave = true;
-    }
-    setStatus("Complete", "success");
-  }
+  // The rest of the preview is the recording the page already shows; the
+  // session form the user filled in stays as it is.
+  if (msg.preview)
+    setRunResultToken(state, String(msg.preview.run_result_token ?? ""));
+  if (msg.summary?.parameters) setParameters(state, msg.summary.parameters);
+  finishRun(
+    live,
+    msg.summary ? toRunSummary(msg.summary, msg.preview) : null,
+    Date.now(),
+  );
+  setStatus("Complete", "success");
+  updateStepAvailability();
+  renderRunStage();
+  void autoSaveRunDecomposition();
 }

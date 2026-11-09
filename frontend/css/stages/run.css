@@ -1,87 +1,335 @@
-/* ── MU Controls ── */
+/* ── Run page: plan, live search, result ── */
 
-.mu-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: flex-end;
-  margin-bottom: 10px;
+.stage-run {
+  gap: 18px;
+  overflow: auto;
+  /* Matches the settings rail's side, so centred content lines up with the stepper. */
+  padding-right: 38px;
 }
 
-.mu-controls label {
+.stage-run[data-mode="pre"] .run-live,
+.stage-run[data-mode="live"] .run-result,
+.stage-run[data-mode="live"] .run-again-btn {
+  display: none;
+}
+
+.run-live {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: var(--fs-sm);
-  color: var(--muted);
-  font-weight: var(--fw-light);
+  gap: 18px;
 }
 
-.mu-controls select {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  min-width: 160px;
+.run-action-btn {
+  align-self: flex-start;
 }
 
-.stage-run .mu-controls select {
-  height: 40px;
-  padding: 0 12px;
-  font-size: var(--fs-md);
-  font-weight: var(--fw-bold);
-  line-height: 1;
-  min-width: 110px;
+.cancel-run-btn {
+  align-self: center;
+  width: auto;
+  padding: 4px 14px;
 }
 
-.stage-run #muSelect {
-  width: 110px;
+.run-again-btn {
+  align-self: center;
 }
 
-.mu-meta {
-  font-size: var(--fs-sm);
-  color: var(--muted);
-  flex: 1;
-  font-weight: var(--fw-light);
-}
+/* Phase track: the loader's dots, one per pipeline phase. */
 
-/* ── KPI Cards ── */
-
-.run-kpis {
+.run-phases {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  margin: 0;
+  /* Room for the active dot's 8px bounce: the scrolling stage clips above its top. */
+  padding: 8px 0 0;
+  list-style: none;
+  justify-content: center;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.run-phases li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.45;
+  transition: opacity 0.2s ease;
+}
+
+.run-phase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid var(--phase-color);
+}
+
+.run-phases li:nth-child(1) {
+  --phase-color: var(--mu-1);
+}
+.run-phases li:nth-child(2) {
+  --phase-color: var(--mu-2);
+}
+.run-phases li:nth-child(3) {
+  --phase-color: var(--mu-3);
+}
+.run-phases li:nth-child(4) {
+  --phase-color: var(--mu-4);
+}
+.run-phases li:nth-child(5) {
+  --phase-color: var(--mu-5);
+}
+
+.run-phases li.is-done,
+.run-phases li.is-active,
+.run-phases li.is-failed {
+  opacity: 1;
+}
+
+.run-phases li.is-done .run-phase-dot,
+.run-phases li.is-active .run-phase-dot {
+  background: var(--phase-color);
+}
+
+.run-phases li.is-active {
+  color: var(--text);
+}
+
+.run-phases li.is-active .run-phase-dot {
+  animation: upload-bounce 0.8s ease-in-out infinite;
+}
+
+.run-phases li.is-failed {
+  color: var(--danger-text);
+}
+
+.run-phases li.is-failed .run-phase-dot {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+/* Counter and clock */
+
+.run-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.run-count {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 4px 10px;
+}
+
+.run-count-value {
+  display: inline-block;
+  font-size: var(--fs-xl);
+  line-height: 1;
+  font-weight: var(--fw-bold);
+  color: var(--mu-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.run-count-value.is-bumped {
+  animation: run-bump 0.35s ease-out;
+}
+
+.run-count-label {
+  font-size: var(--fs-md);
+  color: var(--text);
+}
+
+.run-count-grids {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  flex-basis: 100%;
+  gap: 4px 18px;
+  font-size: var(--fs-sm);
+}
+
+.run-count-grids span {
+  color: var(--grid-color);
+}
+
+.run-count-grids:empty {
+  display: none;
+}
+
+.run-time {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.run-error {
+  padding: 10px 12px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  background: var(--danger-surface);
+  color: var(--danger-text);
+  font-size: var(--fs-md);
+  overflow-wrap: anywhere;
+}
+
+/* Result */
+
+.run-result {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.run-save-text {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.run-save-text:empty {
+  display: none;
+}
+
+.run-result-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
-.kpi-card {
-  flex: 1;
-  border-radius: 0;
-  padding: 6px 0 10px;
-  border-bottom: 1px solid var(--border);
-}
+/* Search: one dot per iteration */
 
-.kpi-label {
+.run-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 14px;
+  margin-bottom: 12px;
   font-size: var(--fs-sm);
   color: var(--muted);
-  font-weight: var(--fw-light);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-bottom: 4px;
 }
 
-.kpi-value {
-  font-size: var(--fs-lg);
-  font-weight: var(--fw-bold);
-  color: var(--text);
+.run-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.stage-run .chart-card {
-  flex: 1 1 0;
-  min-height: 0;
+.run-dots {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
-#muPulseCanvas {
-  flex: 1 1 auto;
-  min-height: 0;
-  height: 100%;
+.run-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.run-row.is-grid-start {
+  margin-top: 8px;
+}
+
+.run-row-label {
+  font-size: var(--fs-sm);
+  line-height: 1.2;
+  color: var(--grid-color);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Columns stretch to fill the panel, and wrap to another line rather than go under 8px. */
+.run-row-dots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8px, 1fr));
+  row-gap: 4px;
+  align-items: center;
+  justify-items: center;
+}
+
+.run-dot {
+  display: inline-block;
+  width: min(8px, 80%);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: var(--border);
+  opacity: 0.5;
+}
+
+.run-legend .run-dot {
+  width: 8px;
+}
+
+.run-dot.is-kept {
+  background: var(--grid-color, var(--text));
+  opacity: 1;
+}
+
+.run-dot.is-kept.is-new {
+  animation: run-pop 0.45s ease-out;
+}
+
+.run-dot.is-rejected {
+  background: var(--muted);
+  opacity: 0.45;
+}
+
+.run-dot.is-few {
+  background: transparent;
+  border: 1px solid var(--muted);
+  opacity: 0.6;
+}
+
+.run-dot.is-skipped {
+  opacity: 0.15;
+}
+
+.stage-run[data-mode="result"] .run-row-dots .run-dot {
+  width: min(6px, 80%);
+}
+
+@keyframes run-pop {
+  0% {
+    transform: scale(2.2);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--grid-color) 35%, transparent);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@keyframes run-bump {
+  0% {
+    transform: translateY(-4px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .run-phases li.is-active .run-phase-dot,
+  .run-dot.is-kept.is-new,
+  .run-count-value.is-bumped {
+    animation: none;
+  }
+}
+
+@media (max-width: 600px) {
+  .run-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
 }

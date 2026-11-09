@@ -1,0 +1,250 @@
+/**
+ * Draws the run page from the live run model (`decomp/live.js`): the phase
+ * track, per-iteration dots, timing and the summary.
+ */
+import { DOT, keptTotal, searchSecondsLeft } from "../decomp/live.js";
+
+/** @typedef {import("../app/context.js").Els} Els */
+/** @typedef {import("../decomp/live.js").RunLive} RunLive */
+
+/** Grid colours on the run page: the step colours, extended to ten. */
+const GRID_COLOR_COUNT = 10;
+
+/** Dot class per DOT code. */
+const DOT_CLASS = ["", "is-kept", "is-rejected", "is-few", "is-skipped"];
+
+/** The run whose dots are on screen; a new run rebuilds them. */
+/** @type {RunLive | null} */
+let dotsFor = null;
+
+/**
+ * "1:05", "12:40", "1:02:03".
+ *
+ * @param {number} seconds
+ */
+export function formatClock(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+
+/**
+ * "about 2 min", "under a minute".
+ *
+ * @param {number} seconds
+ */
+export function formatRemaining(seconds) {
+  if (seconds < 60) return "under a minute";
+  return `about ${Math.round(seconds / 60)} min`;
+}
+
+/** @param {number} grid */
+function gridColor(grid) {
+  return `var(--mu-${(grid % GRID_COLOR_COUNT) + 1})`;
+}
+
+/**
+ * Each grid's count in its dots' colour; none for a single grid.
+ *
+ * @param {HTMLElement} host
+ * @param {number[]} counts
+ */
+function renderGridCounts(host, counts) {
+  const key = counts.length < 2 ? "" : counts.join(",");
+  if (host.dataset.counts === key) return;
+  host.dataset.counts = key;
+  host.replaceChildren(
+    ...(key ? counts : []).map((n, g) => {
+      const span = document.createElement("span");
+      span.style.setProperty("--grid-color", gridColor(g));
+      // By number: grids of one recording often share a model name.
+      span.textContent = `Grid ${g + 1}: ${n}`;
+      return span;
+    }),
+  );
+}
+
+/**
+ * @param {HTMLElement} el
+ * @param {string} cls
+ */
+function replayAnimation(el, cls) {
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
+}
+
+/**
+ * @param {Els} els
+ * @param {RunLive} live
+ * @param {string[]} gridNames
+ */
+function buildDots(els, live, gridNames) {
+  const host = els.runDots;
+  if (!host) return;
+  const nwindows = live.rows.filter((r) => r.grid === 0).length || 1;
+  host.replaceChildren(
+    ...live.rows.map((row) => {
+      const line = document.createElement("div");
+      // A grid's first row, after another grid's: spaced off to group each grid's windows.
+      line.className =
+        row.window === 0 && row.grid > 0 ? "run-row is-grid-start" : "run-row";
+      line.style.setProperty("--grid-color", gridColor(row.grid));
+      const label = document.createElement("span");
+      label.className = "run-row-label";
+      const grid = `Grid ${row.grid + 1}`;
+      label.textContent = nwindows > 1 ? `${grid} · W${row.window + 1}` : grid;
+      label.title = gridNames[row.grid] || grid;
+      const dots = document.createElement("div");
+      dots.className = "run-row-dots";
+      for (const code of row.dots) {
+        const dot = document.createElement("i");
+        dot.className = `run-dot ${DOT_CLASS[code]}`;
+        dots.appendChild(dot);
+      }
+      line.append(label, dots);
+      return line;
+    }),
+  );
+  dotsFor = live;
+}
+
+/**
+ * Restyle the dots one event changed; new kept dots pop.
+ *
+ * @param {Els} els
+ * @param {RunLive} live
+ * @param {{ row: number, from: number, to: number }} change
+ */
+export function updateRunDots(els, live, change) {
+  if (dotsFor !== live) return;
+  const line = els.runDots?.children[change.row];
+  const dots = line?.lastElementChild?.children;
+  if (!dots) return;
+  const row = live.rows[change.row];
+  for (let i = change.from; i < change.to && i < dots.length; i++) {
+    const code = row.dots[i];
+    dots[i].className =
+      `run-dot ${DOT_CLASS[code]}${code === DOT.kept ? " is-new" : ""}`;
+  }
+}
+
+/**
+ * @param {Els} els
+ * @param {RunLive | null} live
+ * @param {number} now
+ */
+export function renderRunTime(els, live, now) {
+  if (!live) return;
+  if (live.status !== "running") {
+    const end = live.finishedAt ?? now;
+    if (els.runElapsed) {
+      els.runElapsed.textContent = `Took ${formatClock((end - live.startedAt) / 1000)}`;
+    }
+    if (els.runEta) els.runEta.textContent = "";
+    return;
+  }
+  if (els.runElapsed) {
+    els.runElapsed.textContent = `Elapsed ${formatClock((now - live.startedAt) / 1000)}`;
+  }
+  const left = searchSecondsLeft(live, now);
+  if (els.runEta) {
+    els.runEta.textContent =
+      left === null ? "" : `${formatRemaining(left)} left in the search`;
+  }
+}
+
+/**
+ * @param {Els} els
+ * @param {RunLive} live
+ */
+function renderPhases(els, live) {
+  const items = [...(els.runPhases?.querySelectorAll("li") ?? [])];
+  const current = items.findIndex((li) => li.dataset.phase === live.phase);
+  const saveFailed = live.status === "done" && !!live.saveError;
+  const finished = live.status === "done" && !live.saving && !saveFailed;
+  items.forEach((li, idx) => {
+    const active = idx === current && !finished;
+    li.classList.toggle("is-done", finished || idx < current);
+    li.classList.toggle(
+      "is-active",
+      active && (live.status === "running" || live.saving),
+    );
+    li.classList.toggle(
+      "is-failed",
+      active && (live.status === "failed" || saveFailed),
+    );
+  });
+}
+
+/**
+ * @param {Els} els
+ * @param {RunLive} live
+ */
+function renderCount(els, live) {
+  const found = keptTotal(live);
+  const summary = live.summary;
+  const value = summary ? summary.nMu : found;
+  if (els.runCount && els.runCount.textContent !== String(value)) {
+    els.runCount.textContent = String(value);
+    if (!summary && value > 0) replayAnimation(els.runCount, "is-bumped");
+  }
+  if (els.runCountLabel) {
+    els.runCountLabel.textContent = summary
+      ? `motor unit${value === 1 ? "" : "s"} kept`
+      : `motor unit${value === 1 ? "" : "s"} found`;
+  }
+  if (els.runCountGrids) {
+    renderGridCounts(
+      els.runCountGrids,
+      summary ? summary.nMuByGrid : live.keptByGrid,
+    );
+  }
+}
+
+/**
+ * @param {Els} els
+ * @param {RunLive} live
+ */
+function renderResult(els, live) {
+  const summary = live.summary;
+  let saveText = "";
+  if (live.status === "done") {
+    if (live.saving) saveText = "Saving the decomposition…";
+    else if (live.saveError) saveText = `Save failed: ${live.saveError}`;
+    else if (!summary?.nMu) saveText = "No motor units to save.";
+  }
+  if (els.runSaveText) els.runSaveText.textContent = saveText;
+  if (els.runRetrySaveBtn) els.runRetrySaveBtn.hidden = !live.saveError;
+  if (els.runError) {
+    els.runError.hidden = live.status !== "failed";
+    els.runError.textContent = live.error;
+  }
+}
+
+/**
+ * Draw the run page for `live`: nothing before a run, the live search during
+ * one, and the result after.
+ *
+ * @param {Els} els
+ * @param {RunLive | null} live
+ * @param {{ gridNames: string[], now: number }} ctx
+ */
+export function renderRunStage(els, live, ctx) {
+  const stage = els.stageRun;
+  if (!stage) return;
+  if (!live) {
+    stage.dataset.mode = "pre";
+    return;
+  }
+  stage.dataset.mode = live.status === "running" ? "live" : "result";
+  if (dotsFor !== live || els.runDots?.childElementCount !== live.rows.length) {
+    buildDots(els, live, ctx.gridNames);
+  }
+  renderPhases(els, live);
+  renderCount(els, live);
+  renderRunTime(els, live, ctx.now);
+  renderResult(els, live);
+}

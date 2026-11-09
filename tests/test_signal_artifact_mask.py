@@ -1,0 +1,209 @@
+"""Tests for the automatic artifact-mask detector (:mod:`muedit.signal.artifact_mask`)."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from muedit.signal.artifact_mask import (
+    ArtifactMaskConfig,
+    _detect_artifact_mask,
+    detect_artifact_masks,
+    intervals_to_mask,
+    mask_to_intervals,
+)
+from tests._synthetic_emg import bandpass_signals
+
+# ── Fixtures ─────────────────────────────────────────────────────────────────
+
+FSAMP = 2000.0
+N_CHANNELS = 64
+N_SAMPLES = 20_000
+
+
+def _clean_emg(
+    n_channels: int = N_CHANNELS,
+    n_samples: int = N_SAMPLES,
+    noise_std: float = 0.01,
+) -> np.ndarray:
+    """Synthetic clean HD-EMG: bandpass-filtered Gaussian noise."""
+    rng = np.random.default_rng(42)
+    raw = rng.normal(0, noise_std, size=(n_channels, n_samples)).astype(np.float32)
+    return bandpass_signals(raw, FSAMP, emg_type=1).astype(np.float32)
+
+
+def _inject_burst(
+    data: np.ndarray,
+    center: int,
+    half_width: int = 200,
+    amplitude: float = 0.05,
+    n_active_channels: int = 4,
+) -> np.ndarray:
+    """Inject a physiological burst on a few channels."""
+    data = data.copy()
+    n_channels = data.shape[0]
+    t = np.arange(data.shape[1])
+    envelope = amplitude * np.exp(-((t - center) ** 2) / (2 * half_width**2))
+    active = np.random.default_rng(99).choice(n_channels, size=n_active_channels, replace=False)
+    data[active] += envelope[np.newaxis, :]
+    return data
+
+
+def _inject_artifact(
+    data: np.ndarray,
+    center: int,
+    half_width: int = 50,
+    amplitude: float = 0.3,
+    channels: slice | None = None,
+    polarity: float = 1.0,
+) -> np.ndarray:
+    """Inject a high-amplitude transient artifact on a subset of channels."""
+    data = data.copy()
+    if channels is None:
+        channels = slice(None)
+    t = np.arange(data.shape[1])
+    envelope = polarity * amplitude * np.exp(-((t - center) ** 2) / (2 * half_width**2))
+    data[channels] += envelope[np.newaxis, :]
+    return data
+
+
+# ── _detect_artifact_mask ────────────────────────────────────────────────────
+
+
+def test_clean_signal_has_empty_mask() -> None:
+    mask = _detect_artifact_mask(_clean_emg(), FSAMP)
+    assert mask.dtype == bool and mask.shape == (N_SAMPLES,)
+    assert not mask.any()
+
+
+@pytest.mark.parametrize(
+    "channels,polarity",
+    [(slice(None), 1.0), (slice(0, 15), -1.0)],
+    ids=["whole-grid", "partial-grid"],
+)
+def test_transient_is_masked_around_its_center(channels: slice, polarity: float) -> None:
+    center = N_SAMPLES // 2
+    data = _inject_artifact(_clean_emg(), center, channels=channels, polarity=polarity)
+    masked = np.flatnonzero(_detect_artifact_mask(data, FSAMP))
+    assert masked.size and masked[0] <= center <= masked[-1]
+    assert center - 200 < masked[0] and masked[-1] < center + 200
+    assert np.all(np.diff(masked) == 1), "one contiguous region expected"
+
+
+# ── Physiological activity must not be masked ────────────────────────────────
+
+
+def test_burst_on_few_channels_not_flagged() -> None:
+    data = _inject_burst(_clean_emg(), N_SAMPLES // 2, amplitude=0.05, half_width=300)
+    assert not _detect_artifact_mask(data, FSAMP).any()
+
+
+def test_short_contraction_in_mostly_rest_not_flagged() -> None:
+    """A short contraction in a mostly-rest recording is not an artifact."""
+    data = _clean_emg()
+    start, end = 8000, 12000
+    rng = np.random.default_rng(7)
+    activity = bandpass_signals(
+        rng.normal(0, 0.1, size=(N_CHANNELS, end - start)).astype(np.float32),
+        FSAMP,
+        emg_type=1,
+    )
+    ramp = np.ones(end - start, dtype=np.float32)
+    taper = np.hanning(800).astype(np.float32)
+    ramp[:400], ramp[-400:] = taper[:400], taper[400:]
+    data[:, start:end] += activity * ramp
+    mask = _detect_artifact_mask(data, FSAMP)
+    assert not mask[start:end].any()
+
+
+def test_few_defective_channels_not_flagged() -> None:
+    """Transients on fewer than ``min_channels`` channels are not artifacts."""
+    data = _clean_emg()
+    t = np.arange(N_SAMPLES)
+    for center in range(1000, N_SAMPLES - 1000, 1400):
+        data = _inject_artifact(
+            data,
+            center,
+            half_width=15,
+            amplitude=1.0,
+            channels=slice(0, 3),
+        )
+        envelope = 0.01 * np.exp(-((t - center) ** 2) / (2 * 60**2))
+        noise = np.random.default_rng(center).normal(0, 1, size=(6, N_SAMPLES))
+        data[10:16] += (envelope[np.newaxis, :] * noise).astype(np.float32)
+    mask = _detect_artifact_mask(data, FSAMP)
+    assert not mask.any()
+
+
+# ── detect_artifact_masks (multi-grid) ───────────────────────────────────────
+
+
+def test_multi_grid_mask_is_the_union_of_the_grids() -> None:
+    center = N_SAMPLES // 2
+    data = _inject_artifact(
+        _clean_emg(n_channels=2 * N_CHANNELS), center, channels=slice(0, N_CHANNELS), polarity=-1.0
+    )
+    global_mask = detect_artifact_masks(data, FSAMP, [N_CHANNELS, N_CHANNELS])
+    grid0 = _detect_artifact_mask(data, FSAMP, rows=slice(0, N_CHANNELS))
+    grid1 = _detect_artifact_mask(data, FSAMP, rows=slice(N_CHANNELS, 2 * N_CHANNELS))
+    assert grid0[center]
+    assert not grid1.any()
+    np.testing.assert_array_equal(global_mask, grid0 | grid1)
+
+
+# ── Kept rows ───────────────────────────────────────────────────────────────
+
+
+def test_kept_rows_give_the_mask_of_the_stacked_rows() -> None:
+    data = _clean_emg(n_samples=40_000)
+    for center in (5_000, 17_000, 30_011):
+        data = _inject_artifact(data, center, channels=slice(0, 40))
+    rows = np.array([0, 2, 5, 7, 9, *range(12, N_CHANNELS)])
+    want = _detect_artifact_mask(data[rows], FSAMP)
+    assert want.any()
+    np.testing.assert_array_equal(_detect_artifact_mask(data, FSAMP, rows=rows), want)
+    mask = detect_artifact_masks(data, FSAMP, [rows.size], kept_rows=[rows])
+    np.testing.assert_array_equal(mask, want)
+
+
+# ── Run extension ───────────────────────────────────────────────────────────
+
+
+def _long_burst_grid() -> np.ndarray:
+    """A 3 s broadband burst on every channel, longer than the 2 s local baseline."""
+    data = _clean_emg(n_samples=40_000)
+    burst = np.random.default_rng(5).normal(0, 0.2, (N_CHANNELS, 6_000)).astype(np.float32)
+    data[:, 15_000:21_000] += bandpass_signals(burst, FSAMP, emg_type=1).astype(np.float32)
+    return data
+
+
+def test_long_artifact_is_masked_whole() -> None:
+    data = _long_burst_grid()
+    mask = _detect_artifact_mask(data, FSAMP)
+    assert mask[15_000:21_000].mean() > 0.95
+    assert not mask[:14_000].any() and not mask[22_000:].any()
+    # Without the extension only its edges stand out against the local baseline.
+    edges = _detect_artifact_mask(data, FSAMP, ArtifactMaskConfig(max_extend_s=0.0))
+    assert edges[15_000:21_000].mean() < 0.1
+
+
+def test_extension_stops_at_emg_well_below_the_artifact() -> None:
+    """A contraction starting under a brief artifact is not masked with it."""
+    data = _clean_emg(n_samples=40_000)
+    data[:, 15_000:21_000] *= 3
+    data = _inject_artifact(data, 15_000, amplitude=0.3)
+    mask = _detect_artifact_mask(data, FSAMP)
+    assert mask[15_000] and not mask[15_400:].any()
+
+
+# ── Intervals ───────────────────────────────────────────────────────────────
+
+
+def test_mask_and_intervals_round_trip() -> None:
+    mask = np.zeros(100, bool)
+    mask[[0, 3, 4, 5, 40, 90, 91, 99]] = True
+    regions = mask_to_intervals(mask)
+    assert regions.tolist() == [[0, 1], [3, 6], [40, 41], [90, 92], [99, 100]]
+    np.testing.assert_array_equal(intervals_to_mask(regions, 100), mask)
+    assert mask_to_intervals(np.zeros(4, bool)).tolist() == []
+    assert mask_to_intervals(None).tolist() == []

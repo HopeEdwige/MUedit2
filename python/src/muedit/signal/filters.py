@@ -2,77 +2,147 @@
 
 from __future__ import annotations
 
+import os
+from collections import deque
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
+from itertools import islice
+from typing import TypeVar
+
 import numpy as np
+from scipy.fft import irfft, rfft
 from scipy.signal import butter, filtfilt
 
+from muedit.errors import MueditError
 from muedit.models import FloatArray
 
 NOTCH_WINDOW_HZ: float = 50.0
+#: Threads that filter rows at once (filtfilt and scipy's FFT release the GIL).
+FILTER_THREADS: int = min(4, os.cpu_count() or 1)
+#: Rows filtered together where a whole-grid copy would be too large.
+FILTER_BLOCK_ROWS: int = 8
+#: Working memory the filter threads may hold together.
+FILTER_WORK_BYTES: int = 64 * 1024 * 1024
+#: Bytes per sample one row's filtering holds: its float64 copies and complex spectra.
+_ROW_WORK_BYTES_PER_SAMPLE = 64
+#: Below this many samples in all, a thread costs more than the filtering it takes over.
+_MIN_THREADED_SAMPLES = 1 << 20
+
+T = TypeVar("T")
 
 
-def demean(signal: FloatArray) -> FloatArray:
-    """Remove per-channel DC offset from a 2D signal array."""
-    return signal - np.mean(signal, axis=1, keepdims=True)
+def demean(data: FloatArray) -> FloatArray:
+    """Remove per-channel DC offset from a 2D signal array; the mean is taken in float64."""
+    mean = np.mean(data, axis=1, keepdims=True, dtype=np.float64)
+    if data.dtype == np.float32:
+        return (data - mean).astype(np.float32)
+    return data - mean
 
 
-def bandpass_signals(signal: FloatArray, fsamp: float, emg_type: int = 1) -> FloatArray:
-    """Zero-phase Butterworth bandpass: emg_type=1 → 20–500 Hz (surface), 2 → 100–4400 Hz (intramuscular)."""
+def filter_workers(n_rows: int, n_samples: int) -> int:
+    """Threads for filtering ``n_rows`` rows of ``n_samples``, within ``FILTER_WORK_BYTES``."""
+    if n_rows < 2 or n_rows * n_samples < _MIN_THREADED_SAMPLES:
+        return 1
+    fit = FILTER_WORK_BYTES // max(1, _ROW_WORK_BYTES_PER_SAMPLE * n_samples)
+    return max(1, min(FILTER_THREADS, n_rows, fit))
+
+
+def map_rows(fn: Callable[[int], T], rows: range, n_samples: int) -> Iterator[T]:
+    """``fn(row)`` for each of ``rows`` on ``filter_workers`` threads, in order; ``fn`` owns its row."""
+    workers = filter_workers(len(rows), n_samples)
+    if workers == 1:
+        yield from map(fn, rows)
+        return
+    pool = ThreadPoolExecutor(workers, thread_name_prefix="muedit-filter")
+    todo = iter(rows)
+    # One result per thread at most waits to be consumed.
+    pending: deque[Future[T]] = deque(pool.submit(fn, row) for row in islice(todo, workers))
+    try:
+        while pending:
+            result = pending.popleft().result()
+            for row in islice(todo, 1):
+                pending.append(pool.submit(fn, row))
+            yield result
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def for_each_row(fn: Callable[[int], object], rows: range, n_samples: int) -> None:
+    """``map_rows`` for ``fn`` run for what it writes."""
+    deque(map_rows(fn, rows, n_samples), maxlen=0)
+
+
+def _bandpass_coefficients(fsamp: float, emg_type: int) -> tuple[FloatArray, FloatArray]:
+    """Butterworth (b, a) for the surface (1) or intramuscular (2) bandpass."""
     if emg_type == 1:
         if fsamp <= 1000:
-            raise ValueError(
+            raise MueditError(
                 f"Surface bandpass (20-500 Hz) requires fsamp > 1000 Hz; got {fsamp} Hz."
             )
-        b, a = butter(2, [20, 500], btype="bandpass", fs=fsamp)
-    else:
-        if fsamp <= 8800:
-            raise ValueError(
-                f"Intramuscular bandpass (100-4400 Hz) requires fsamp > 8800 Hz; got {fsamp} Hz."
-            )
-        b, a = butter(3, [100, 4400], btype="bandpass", fs=fsamp)
-
-    return filtfilt(b, a, signal, axis=-1)
+        return butter(2, [20, 500], btype="bandpass", fs=fsamp)
+    if fsamp <= 8800:
+        raise MueditError(
+            f"Intramuscular bandpass (100-4400 Hz) requires fsamp > 8800 Hz; got {fsamp} Hz."
+        )
+    return butter(3, [100, 4400], btype="bandpass", fs=fsamp)
 
 
-def notch_signals(signal: FloatArray, fsamp: float) -> FloatArray:
-    """FFT-based notch that suppresses mains harmonics without knowing the line frequency."""
-    if signal.size == 0:
-        return signal
+def _filter_rows_inplace(data: FloatArray, filter_one: Callable[[FloatArray], FloatArray]) -> None:
+    """Write ``filter_one(row)`` back into each row of ``data``, on the filter threads."""
 
-    n_channels, n_samples = signal.shape
+    def filter_row(row: int) -> None:
+        data[row] = filter_one(data[row])
+
+    for_each_row(filter_row, range(data.shape[0]), data.shape[1])
+
+
+def bandpass_inplace(data: FloatArray, fsamp: float, emg_type: int = 1) -> None:
+    """Zero-phase Butterworth bandpass of ``data`` in place: emg_type=1 → 20–500 Hz (surface), 2 → 100–4400 Hz (intramuscular)."""
+    # filtfilt filters each row on its own, so per-row results are bit-identical.
+    b, a = _bandpass_coefficients(fsamp, emg_type)
+    _filter_rows_inplace(data, lambda row: filtfilt(b, a, row))
+
+
+def _notch_params(fsamp: float, n_samples: int) -> tuple[int, int]:
+    """Harmonic half-width ``frad`` and median window, both in FFT bins."""
     frad = int(round(4 / (fsamp / n_samples)))
     window = max(1, int(round(NOTCH_WINDOW_HZ * n_samples / fsamp)))
+    return frad, window
 
-    def _remove_line_interference(x: FloatArray) -> FloatArray:
-        """Remove interference from a single-channel signal."""
-        fsignal = np.fft.fft(x)
-        fcorrec = np.zeros_like(fsignal, dtype=complex)
 
-        tstamp: list[int] = []
+def _remove_line_interference(x: FloatArray, frad: int, window: int) -> FloatArray:
+    """Remove interference from a single-channel signal, computed in float64."""
+    x = np.asarray(x, dtype=np.float64)  # a float32 FFT would run in single precision
+    n = x.size
+    spectrum = rfft(x)
+    magnitude = np.abs(spectrum)
+    half = frad // 2
 
-        for start in range(0, len(fsignal) - window, window):
-            segment = fsignal[start + 1 : start + window + 1]
-            median_freq = np.median(np.abs(segment))
-            std_freq = np.std(np.abs(segment))
-            tstamp2 = np.where(np.abs(segment) > median_freq + 5 * std_freq)[0] + start + 1
-            for j in range(-int(np.floor(frad / 2)), int(np.floor(frad / 2)) + 1):
-                if tstamp2.size:
-                    tstamp.extend(list(tstamp2 + j))
+    # The thresholds come from segments of the two-sided magnitude. A segment starting more
+    # than ``half`` bins past Nyquist only flags bins that are dropped, so it is not scanned.
+    n_segments = min(len(range(0, n - window, window)), (n // 2 + half - 1) // window + 1)
+    two_sided = np.concatenate([magnitude, magnitude[1 : n - n // 2][::-1]])
+    segments = two_sided[1 : n_segments * window + 1].reshape(n_segments, window)
+    threshold = np.median(segments, axis=1) + 5 * np.std(segments, axis=1)
+    rows, cols = np.nonzero(segments > threshold[:, None])
+    peaks = rows * window + cols + 1
+    tstamp = (peaks[:, None] + np.arange(-half, half + 1)).ravel()
+    tstamp = tstamp[(tstamp > 0) & (tstamp <= n // 2)]
 
-        tstamp_arr = np.array(tstamp, dtype=int)
-        tstamp_arr = tstamp_arr[(tstamp_arr > 0) & (tstamp_arr <= len(fsignal) // 2 + 1)]
-        if tstamp_arr.size:
-            fcorrec[tstamp_arr] = fsignal[tstamp_arr]
+    correction = np.zeros_like(spectrum)
+    correction[tstamp] = spectrum[tstamp]
+    return x - irfft(correction, n)
 
-        n = len(fsignal)
-        correc = n - (n // 2) * 2
-        upper = int(np.ceil(n / 2))
-        for idx in range(1, upper + 1 - correc):
-            fcorrec[-idx] = np.conj(fcorrec[idx])
 
-        return np.real(x - np.fft.ifft(fcorrec))
+def notch_inplace(data: FloatArray, fsamp: float) -> None:
+    """FFT notch of mains harmonics, without knowing the line frequency, written back channel by channel."""
+    if data.size == 0:
+        return
+    frad, window = _notch_params(fsamp, data.shape[1])
+    _filter_rows_inplace(data, lambda row: _remove_line_interference(row, frad, window))
 
-    filtered = np.zeros_like(signal)
-    for ch in range(n_channels):
-        filtered[ch, :] = _remove_line_interference(signal[ch, :])
 
-    return filtered
+def emg_filter_inplace(data: FloatArray, fsamp: float, emg_type: int = 1) -> None:
+    """The decomposition's filtering of one grid's rows (notch, then bandpass), written back."""
+    notch_inplace(data, fsamp)
+    bandpass_inplace(data, fsamp, emg_type)

@@ -1,7 +1,7 @@
 /* ── Workspace & Layout── */
 
 .workspace {
-  padding: 14px;
+  padding: 14px 14px 14px 52px;
   position: relative;
   flex: 1;
   min-height: 0;
@@ -15,22 +15,9 @@
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: 12px;
-  padding: 8px 14px 10px;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  margin: 10px 14px 0;
-}
-
-.status-pill {
-  padding: 4px 6px;
-  border-radius: 999px;
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--fs-sm);
-  letter-spacing: 0.02em;
-  text-transform: none;
-  font-weight: var(--fw-light);
+  padding: 8px 14px 4px;
+  /* Equal sides clear the settings rail and keep the stepper on the window's centre. */
+  margin: 10px 52px 0;
 }
 
 .app-status {
@@ -38,6 +25,10 @@
   justify-self: end;
   min-width: 0;
   max-width: 100%;
+  padding: 4px 6px;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.02em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -47,19 +38,25 @@
   display: none;
 }
 
+.app-status[data-tone="error"] {
+  color: var(--danger);
+}
+
+.app-status[data-tone="success"] {
+  color: var(--success);
+}
+
 .settings-toggle-btn {
-  position: absolute;
-  left: 14px;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  width: 100%;
   color: var(--text);
   border-radius: 0;
-  width: auto;
-  height: auto;
-  padding: 2px;
+  height: var(--control-h);
+  padding: 0;
   line-height: 0;
-  box-shadow: none;
+  border-bottom: 1px solid var(--border);
 }
 
 .settings-toggle-btn:hover {
@@ -70,32 +67,9 @@
   color: var(--accent);
 }
 
-.hamburger-icon {
-  display: inline-flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 4px;
-}
-
-.hamburger-icon span {
-  display: block;
-  width: 16px;
-  height: 2px;
-  border-radius: 2px;
-  background: currentColor;
-}
-
 .settings-toggle-btn svg {
-  width: 26px;
-  height: 26px;
-}
-
-.status-pill[data-tone="error"] {
-  color: var(--danger);
-}
-
-.status-pill[data-tone="success"] {
-  color: var(--success);
+  width: 20px;
+  height: 20px;
 }
 
 /* ── Workflow Stepper ── */
@@ -106,9 +80,55 @@
   justify-content: center;
   gap: 6px;
   flex-wrap: wrap;
+  position: relative;
+  min-height: 40px;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.2s ease;
+}
+
+.workflow-stepper:has(.step-chip.active[data-step="import"]) {
+  border-color: var(--mu-1);
+}
+
+.workflow-stepper:has(.step-chip.active[data-step="qc"]) {
+  border-color: var(--mu-2);
+}
+
+.workflow-stepper:has(.step-chip.active[data-step="run"]) {
+  border-color: var(--mu-3);
+}
+
+.workflow-stepper:has(.step-chip.active[data-step="edit"]) {
+  border-color: var(--mu-4);
+}
+
+.step-indicator {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  background: var(--bg);
+  border-radius: calc(var(--radius-sm) - 1px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.step-indicator.ready {
+  opacity: 1;
+  transition:
+    left 0.2s ease,
+    top 0.2s ease,
+    width 0.2s ease,
+    height 0.2s ease;
 }
 
 .step-chip {
+  position: relative;
+  z-index: 1;
   flex: 0 0 auto;
   display: inline-flex;
   flex-direction: column;
@@ -120,22 +140,28 @@
   color: var(--muted);
   padding: 2px 4px;
   border-radius: 0;
-  font-weight: var(--fw-regular);
   font-size: var(--fs-md);
   letter-spacing: 0.02em;
   cursor: pointer;
   transition:
     color 0.15s ease,
-    opacity 0.15s ease,
-    transform 0.15s ease,
-    font-size 0.15s ease;
+    opacity 0.15s ease;
   appearance: none;
   -webkit-appearance: none;
 }
 
 .step-chip-label {
-  font-size: var(--fs-md);
+  display: inline-grid;
   line-height: 1.05;
+}
+
+/* Reserve the bold label's width so the active chip never resizes the bar. */
+.step-chip-label::after {
+  content: attr(data-label);
+  height: 0;
+  font-weight: var(--fw-semibold);
+  visibility: hidden;
+  overflow: hidden;
 }
 
 .step-chip:hover {
@@ -144,7 +170,6 @@
 
 .step-chip:disabled {
   opacity: 0.6;
-  color: var(--muted);
   cursor: default;
   pointer-events: none;
 }
@@ -171,12 +196,7 @@
 
 .step-chip.active {
   opacity: 1;
-  font-weight: var(--fw-bold);
-  transform: translateY(-1px);
-}
-
-.step-chip.active .step-chip-label {
-  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
 }
 
 .step-chip.complete {
@@ -190,19 +210,6 @@
   padding: 14px;
   flex: 1;
   min-height: 0;
-}
-
-.workspace-grid {
-  flex: 1;
-  min-height: 0;
-}
-
-.control-panel {
-  border-radius: var(--radius);
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
 }
 
 .settings-overlay {
@@ -219,22 +226,16 @@
   position: fixed;
   top: 0;
   left: 0;
-  width: min(380px, 90vw);
+  display: flex;
+  flex-direction: column;
+  width: 52px;
   height: 100dvh;
-  padding: 14px 12px 12px;
+  padding: 14px 16px 12px;
   background: var(--panel);
   border-right: 1px solid var(--border);
-  overflow-y: auto;
-  transform: translateX(-100%);
-  transition: transform 0.2s ease;
+  overflow: hidden;
+  transition: width 0.2s ease;
   z-index: 21;
-  font-weight: var(--fw-light);
-}
-
-@supports not (height: 100dvh) {
-  .settings-panel {
-    height: 100vh;
-  }
 }
 
 .workspace.settings-open .settings-overlay {
@@ -243,94 +244,46 @@
 }
 
 .workspace.settings-open .settings-panel {
-  transform: translateX(0);
+  width: min(330px, 90vw);
+  overflow-y: auto;
 }
 
-/* ── Settings Panel Density ── */
-
-.settings-panel .panel-section {
-  padding: 8px 0 10px;
+/* Contracted rail: section icons only */
+.workspace:not(.settings-open) .settings-panel .section-header-main span {
+  display: none;
 }
 
-.settings-panel .section-header {
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-regular);
-  letter-spacing: 0.08em;
-  margin-bottom: 8px;
+.workspace:not(.settings-open) .settings-panel .section-header::after {
+  content: none;
 }
 
-.settings-panel .section-header::after {
-  font-size: var(--fs-sm);
+.workspace:not(.settings-open) .settings-panel .section-content {
+  display: none;
 }
 
-.settings-panel .section-content {
-  gap: 8px;
-}
+/* ── Settings Panel ── */
 
-.settings-panel .field-label,
-.settings-panel .file-display,
-.settings-panel .form-row label {
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-light);
-}
-
-.settings-panel .form-row {
-  gap: 8px;
-}
-
-.settings-panel .form-row input,
-.settings-panel .form-row select {
-  border-radius: 5px;
-  padding: 6px 8px;
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-light);
-}
-
-.settings-panel .form-row select {
-  background-position:
-    calc(100% - 15px) calc(50% - 3px),
-    calc(100% - 10px) calc(50% - 3px);
-  background-size:
-    7px 7px,
-    7px 7px;
-  padding-right: 24px;
-}
-
-.settings-panel .pill-toggle {
-  padding: 7px 10px;
-  border-radius: 5px;
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-regular);
-  letter-spacing: 0.01em;
-}
-
-.settings-panel .start-btn {
-  padding: 10px;
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-regular);
-  letter-spacing: 0.04em;
-}
-
-.settings-panel .auto-info-box {
-  margin-top: 8px;
-  padding: 8px;
-  font-size: var(--fs-xs);
+/* The panel is a fixed-height column: a tall open section must make it scroll,
+   not squeeze the rows above it. */
+.settings-panel > * {
+  flex-shrink: 0;
 }
 
 .panel-section {
-  border-radius: 0;
-  padding: 10px 0 12px;
   border-bottom: 1px solid var(--border);
-  transition: none;
 }
 
+/* Only the open rail shows a section's content; the icon rail keeps every row one height. */
+.workspace.settings-open .panel-section:not(.collapsed) {
+  padding-bottom: 10px;
+}
+
+/* Each rail row, divider included, is one toolbar button tall. */
 .section-header {
+  height: calc(var(--control-h) - 1px);
   font-size: var(--fs-sm);
-  font-weight: var(--fw-bold);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--text);
-  margin-bottom: 12px;
+  font-weight: var(--fw-semibold);
+  color: var(--muted);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -344,14 +297,15 @@
 }
 
 .section-header-main svg {
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
 }
 
 .section-header::after {
   content: "▾";
-  font-size: var(--fs-md);
+  font-size: var(--fs-xs);
+  line-height: 1;
   transition: transform 0.2s ease;
   color: var(--muted);
 }
@@ -363,11 +317,93 @@
 .section-content {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 5px;
 }
 
 .panel-section.collapsed .section-content {
   display: none;
+}
+
+/* The hint names the output folder: a long path wraps instead of widening the panel. */
+#dataFolderHint {
+  overflow-wrap: anywhere;
+}
+
+/* ── Project tree ── */
+
+.project-tree {
+  display: flex;
+  flex-direction: column;
+  font-size: var(--fs-sm);
+}
+
+.tree-project {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tree-project svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--muted);
+}
+
+.tree-project span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "+ New project…" has no icon: its text lines up with the names. */
+.tree-project:not(:has(svg)) {
+  padding-left: 28px;
+  color: var(--muted);
+}
+
+.tree-project:hover:not(:disabled) {
+  background: var(--surface);
+}
+
+.tree-project:disabled,
+#dataFolderBtn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.tree-project:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.tree-project[aria-current] {
+  background: var(--surface-active);
+  color: var(--accent);
+  font-weight: var(--fw-semibold);
+}
+
+.tree-project[aria-current] svg {
+  color: var(--accent);
+}
+
+#dataFolderBtn {
+  margin-top: 6px;
+}
+
+#bidsMuscleContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
 }
 
 .row {
@@ -381,21 +417,15 @@
 }
 
 .field-label {
-  font-size: var(--fs-md);
+  font-size: var(--fs-sm);
   color: var(--muted);
-  font-weight: var(--fw-light);
 }
 
 .file-display {
   flex: 1;
   text-align: right;
   color: var(--text);
-  font-weight: var(--fw-bold);
-  font-size: var(--fs-md);
-}
-
-.file-display.loading {
-  color: var(--accent);
+  font-size: var(--fs-sm);
 }
 
 .form-row {
@@ -405,25 +435,15 @@
   gap: 10px;
 }
 
-.form-row.slim {
-  grid-template-columns: auto 160px;
-}
-
-.aux-selector-row {
-  margin-bottom: 8px;
-}
-
 .form-row label {
   color: var(--muted);
   font-size: var(--fs-md);
-  font-weight: var(--fw-light);
 }
 
 .form-hint {
   margin: -2px 0 0;
   color: var(--muted);
   font-size: var(--fs-sm);
-  font-weight: var(--fw-light);
   line-height: 1.4;
 }
 
@@ -440,18 +460,144 @@
 }
 
 .form-row select {
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
-    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
-  background-position:
-    calc(100% - 18px) calc(50% - 3px),
-    calc(100% - 13px) calc(50% - 3px);
-  background-size:
-    8px 8px,
-    8px 8px;
+  background-image: conic-gradient(
+    from 315deg at 50% 100%,
+    var(--muted) 0 90deg,
+    transparent 90deg
+  );
+  background-position: calc(100% - 18px) center;
+  background-size: 10px 5px;
   background-repeat: no-repeat;
   padding-right: 28px;
-  background-color: var(--surface);
+}
+
+.settings-panel .form-row {
+  grid-template-columns: 116px minmax(0, 1fr);
+  gap: 5px;
+}
+
+.settings-panel .form-row label {
+  font-size: var(--fs-sm);
+}
+
+.settings-panel .form-row input,
+.settings-panel .form-row select {
+  border-radius: 5px;
+  padding: 6px 8px;
+}
+
+.settings-panel .form-row select {
+  background-position: calc(100% - 13px) center;
+  padding-right: 24px;
+}
+
+.settings-panel .form-row [aria-invalid="true"] {
+  border-color: var(--danger);
+  background-color: var(--danger-bg);
+}
+
+.settings-panel .form-row:has([aria-invalid="true"]) label {
+  color: var(--danger-text);
+}
+
+/* The channel and segment-type pickers split the plot's width. */
+.aux-selector-row {
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 8px;
+}
+
+/* Reads as the plot's heading, like the chart titles. */
+.form-row.aux-selector-row select,
+.segment-picker-btn {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.segment-picker {
+  position: relative;
+  min-width: 0;
+}
+
+/* Drawn like the select beside it. */
+.segment-picker-btn {
+  width: 100%;
+  background: var(--surface)
+    conic-gradient(
+      from 315deg at 50% 100%,
+      var(--muted) 0 90deg,
+      transparent 90deg
+    )
+    no-repeat calc(100% - 18px) center / 10px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 28px 8px 10px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.segment-picker-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.segment-picker-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: grid;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.segment-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+/* Undo the text-field look `.form-row input` gives every input. */
+.segment-picker-row input[type="checkbox"] {
+  appearance: auto;
+  width: auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.segment-picker-row:hover {
+  background: var(--surface-active);
+}
+
+.segment-picker-glyph {
+  width: 1em;
+  text-align: center;
+}
+
+.segment-picker-glyph[data-kind="ramp"] {
+  color: var(--plot-ramp-stroke);
+}
+
+.segment-picker-glyph[data-kind="plateau"] {
+  color: var(--plot-plateau-stroke);
+}
+
+.segment-picker-glyph[data-kind="sinusoid"] {
+  color: var(--plot-sinusoid-stroke);
+}
+
+.segment-picker-glyph[data-kind="irregular"] {
+  color: var(--plot-irregular-stroke);
 }
 
 .toggle-row {
@@ -468,7 +614,7 @@
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  font-weight: var(--fw-bold);
+  font-weight: var(--fw-semibold);
   font-size: var(--fs-md);
   letter-spacing: 0.02em;
   cursor: pointer;
@@ -480,12 +626,19 @@
 .pill-toggle.on {
   background: var(--surface-active);
   border-color: var(--accent);
-  color: var(--text);
 }
 
 .pill-toggle:focus {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+.settings-panel .pill-toggle {
+  padding: 7px 10px;
+  border-radius: 5px;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-regular);
+  letter-spacing: 0.01em;
 }
 
 .start-btn {
@@ -496,9 +649,7 @@
   border: none;
   border-radius: var(--radius);
   padding: 13px;
-  font-weight: var(--fw-bold);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  font-weight: var(--fw-semibold);
   font-size: var(--fs-md);
   cursor: pointer;
   transition: opacity 0.12s ease;
@@ -516,21 +667,10 @@
 /* ── Visual Panel ── */
 
 .visual-panel {
-  border-radius: var(--radius);
-  padding: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
   flex: 1;
-  min-height: 0;
-}
-
-.split {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
-  flex: 1;
-  align-items: stretch;
   min-height: 0;
 }
 
@@ -548,46 +688,13 @@
 
 .scroll-card {
   height: 100%;
-  max-height: none;
   overflow: auto;
-}
-
-/* ── Progress ── */
-
-.progress-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.progress-text {
-  color: var(--muted);
-  font-size: var(--fs-md);
-  font-weight: var(--fw-light);
-}
-
-.progress-track {
-  width: 100%;
-  height: 8px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.progress-bar {
-  height: 100%;
-  background: var(--accent-2);
-  width: 0%;
-  transition: width 0.2s ease;
 }
 
 /* ── Chart Cards ── */
 
 .chart-card {
-  border-radius: 0;
   padding: 4px 0 12px;
-  border-bottom: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -595,9 +702,7 @@
 
 .chart-title {
   color: var(--muted);
-  font-weight: var(--fw-bold);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-weight: var(--fw-semibold);
   font-size: var(--fs-sm);
   margin-bottom: 8px;
 }

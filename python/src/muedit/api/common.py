@@ -1,188 +1,51 @@
-"""Shared request parsing and serialization helpers for API routes."""
+"""Shared request helpers and serialization for API routes."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any
 
 import numpy as np
-from fastapi import HTTPException
+from fastapi import Header
 
-from muedit.decomp.types import ContrastFunc, DecompositionParameters
+from muedit.api import config
+from muedit.api.cache import BUDGET
+from muedit.api.memory import DEFAULT_SESSION, parse_session_id
+from muedit.errors import MueditError, NotFoundError
+from muedit.io.bids import dataset_root
 
 
-def parse_json(raw: str | None, field_name: str) -> Any:
-    """Parse JSON form field and raise HTTP 400 with field context on failure."""
-    if raw is None or raw == "":
-        return None
+def success_payload(data: Any) -> dict[str, Any]:
+    """Wrap JSON success responses in the canonical v1 envelope."""
+    return {"data": data, "meta": {"api_version": "v1"}}
+
+
+def request_session(x_muedit_session: str | None = Header(None)) -> str:
+    """The calling tab's session id; a request that sends one makes it the active session."""
+    if x_muedit_session is None:
+        return DEFAULT_SESSION
+    session = parse_session_id(x_muedit_session, "X-MUedit-Session")
+    BUDGET.touch(session)
+    return session
+
+
+def bids_root_for(project: str | None) -> Path:
+    """``resolve_bids_root``, with a project name that is not a folder name as a 400."""
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "field": field_name,
-                "reason": "Invalid JSON",
-                "message": str(exc),
-            },
-        ) from exc
+        return config.resolve_bids_root(project)
+    except ValueError as exc:
+        raise MueditError(str(exc), "project") from exc
 
 
-def parse_discard_channels(raw: str | None) -> list[list[int]] | None:
-    """Parse discard channel overrides from JSON list[list[int]]."""
-    parsed = parse_json(raw, "discard_channels")
-    if parsed is None:
+def dataset_root_of(file_path: str) -> Path | None:
+    """The BIDS dataset a file sits in, else the default project folder above it, else ``None``."""
+    if not file_path:
         return None
-    if not isinstance(parsed, list):
-        raise HTTPException(
-            status_code=400,
-            detail={"field": "discard_channels", "reason": "Expected list of lists"},
-        )
-    result: list[list[int]] = []
-    for grid_idx, grid in enumerate(parsed):
-        if not isinstance(grid, list):
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "field": "discard_channels",
-                    "reason": f"Grid {grid_idx} must be a list",
-                },
-            )
-        try:
-            result.append([int(x) for x in grid])
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "field": "discard_channels",
-                    "reason": f"Grid {grid_idx} contains non-integer values",
-                },
-            ) from exc
-    return result
-
-
-def parse_rois(raw: str | None, field: str = "rois") -> list[tuple[int, int]] | None:
-    """Parse a sample-range payload into a list of (start, end) tuples."""
-    parsed = parse_json(raw, field)
-    if parsed is None:
-        return None
-    if not isinstance(parsed, list):
-        raise HTTPException(
-            status_code=400,
-            detail={"field": field, "reason": "Expected list of [start, end] pairs"},
-        )
-
-    result: list[tuple[int, int]] = []
-    for idx, item in enumerate(parsed):
-        if isinstance(item, (list, tuple)) and len(item) == 2:
-            start_raw, end_raw = item
-        elif isinstance(item, dict) and "start" in item and "end" in item:
-            start_raw, end_raw = item["start"], item["end"]
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "field": field,
-                    "reason": f"Range {idx} must be [start, end] or object with start/end",
-                },
-            )
-        try:
-            result.append((int(start_raw), int(end_raw)))
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={"field": field, "reason": f"Range {idx} has non-integer bounds"},
-            ) from exc
-    return result
-
-
-def parse_json_object(raw: str | None, field_name: str) -> dict | None:
-    """Parse and validate a JSON object form field."""
-    parsed = parse_json(raw, field_name)
-    if parsed is None:
-        return None
-    if not isinstance(parsed, dict):
-        raise HTTPException(
-            status_code=400,
-            detail={"field": field_name, "reason": "Expected JSON object"},
-        )
-    return parsed
-
-
-def _coerce_param_value(current: Any, value: Any) -> Any:
-    """Coerce a JSON override value to match the type of the existing param.
-
-    ``bool`` is handled explicitly because ``bool("false")`` is ``True`` in Python;
-    string values are interpreted case-insensitively.
-    """
-    if isinstance(current, bool):
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.strip().lower() in ("true", "1", "yes")
-        return bool(value)
-    target_type = type(current)
-    return target_type(value)
-
-
-def build_params(raw: str | None) -> DecompositionParameters:
-    """Build decomposition parameters from optional JSON override payload."""
-    base = DecompositionParameters()
-    if not raw:
-        return base
-
-    data = parse_json(raw, "params")
-    if data is None:
-        return base
-    if not isinstance(data, dict):
-        raise HTTPException(
-            status_code=400,
-            detail={"field": "params", "reason": "Expected JSON object"},
-        )
-    for key, value in data.items():
-        if hasattr(base, key) and value is not None:
-            current = getattr(base, key)
-            try:
-                setattr(base, key, _coerce_param_value(current, value))
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "field": key,
-                        "reason": f"Cannot coerce {value!r} to {type(current).__name__}",
-                    },
-                ) from exc
-
-    contrast_funcs = get_args(ContrastFunc)
-    if base.contrast_func not in contrast_funcs:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "field": "contrast_func",
-                "reason": f"contrast_func must be one of {', '.join(contrast_funcs)}",
-            },
-        )
-    if base.adapt_batch_ms <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "field": "adapt_batch_ms",
-                "reason": "adapt_batch_ms must be > 0",
-            },
-        )
-    if base.use_adaptive and base.adapt_batch_ms > base.edges_sec * 1000:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "field": "adapt_batch_ms",
-                "reason": (
-                    f"adapt_batch_ms must be <= {base.edges_sec * 1000:.0f} "
-                    f"(edges_sec * 1000) when use_adaptive is enabled"
-                ),
-            },
-        )
-    return base
+    path = Path(file_path).expanduser().resolve()
+    root = dataset_root(path)
+    if root is None:
+        root = next((p for p in path.parents if p.name.lower() == config.DEFAULT_PROJECT), None)
+    return root
 
 
 def make_json_safe(value: Any) -> Any:
@@ -200,14 +63,18 @@ def make_json_safe(value: Any) -> Any:
 
 
 def require_existing_path(path: str, field: str = "path") -> Path:
-    """Return ``path`` as a Path, raising HTTP 404 when nothing exists there."""
+    """Return ``path`` as a Path, raising ``NotFoundError`` when nothing exists there."""
     resolved = Path(path)
     if not resolved.exists():
-        raise HTTPException(
-            status_code=404,
-            detail={"field": field, "reason": f"File not found: {path}"},
-        )
+        raise NotFoundError(f"File not found: {path}", field)
     return resolved
+
+
+def missing_upload() -> MueditError:
+    """The error for an upload token the server no longer holds."""
+    return MueditError(
+        "Missing or expired upload; request /api/v1/preview-by-path first", "upload_token"
+    )
 
 
 def parse_entity_label(file_label: str) -> str:
@@ -221,22 +88,3 @@ def parse_entity_label(file_label: str) -> str:
         while stem.endswith(suffix):
             stem = stem[: -len(suffix)]
     return stem
-
-
-def summarize_result(result: dict[str, Any], save_path: str, persisted: bool) -> dict[str, Any]:
-    """Build compact decomposition summary for frontend progress/result panels."""
-    signal = result.get("signal", {})
-    pulse_t = signal.get("PulseT")
-    pulse_len = int(pulse_t.shape[1]) if hasattr(pulse_t, "shape") and pulse_t.size > 0 else 0
-    mu_count = len(signal.get("Dischargetimes", []))
-
-    return {
-        "fsamp": signal.get("fsamp"),
-        "grid_names": result.get("grid_names", []),
-        "mu_count": mu_count,
-        "pulse_length": pulse_len,
-        "sil": result.get("sil", []),
-        "discard_channels": result.get("discard_channels"),
-        "save_path": save_path if persisted else None,
-        "parameters": result.get("parameters"),
-    }

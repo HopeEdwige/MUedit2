@@ -10,33 +10,29 @@ body {
 body {
   margin: 0;
   font-family: var(--font);
+  font-size: var(--fs-md);
   background: var(--bg);
   color: var(--text);
   font-weight: var(--fw-regular);
   overflow-x: hidden;
 }
 
-.glass {
-  background: transparent;
-  border: none;
+button,
+input,
+select,
+textarea {
+  font: inherit;
 }
 
-.hidden {
+/* Wins over any class that sets display. */
+[hidden] {
   display: none !important;
 }
 
 #app {
   height: 100dvh;
-  min-height: 100dvh;
   display: flex;
   flex-direction: column;
-}
-
-@supports not (height: 100dvh) {
-  #app {
-    height: 100vh;
-    min-height: 100vh;
-  }
 }
 
 .page {
@@ -51,34 +47,9 @@ canvas {
   width: 100%;
   display: block;
   border-radius: var(--radius-sm);
-  background: transparent;
-  border: none;
 }
 
 /* ── Misc ── */
-
-.auto-info-box {
-  margin-top: 10px;
-  padding: 10px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: var(--fs-sm);
-  line-height: 1.4;
-  color: var(--muted);
-}
-
-.auto-info-box b {
-  display: block;
-  color: var(--text);
-  margin-bottom: 4px;
-}
-
-.auto-info-item {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 2px;
-}
 
 .icon-btn {
   border: none;

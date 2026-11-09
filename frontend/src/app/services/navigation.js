@@ -1,10 +1,14 @@
+/**
+ * The status line, the workflow stepper, stage availability, the grid tabs
+ * and the edit page's keyboard navigation.
+ */
 import {
   setEditCurrentMu,
   setEditView,
-  setRunCurrentMu,
-  setRunView,
-  setShowBookmark,
+  setEditShowBookmark,
 } from "../../state/actions.js";
+import { getEditMuIndicesForGrid, getEditView } from "../../state/selectors.js";
+import { clampView } from "../../editing/operations.js";
 
 /** @typedef {import("../context.js").App} App */
 /** @typedef {import("../context.js").Els} Els */
@@ -12,7 +16,6 @@ import {
 /** @typedef {import("../context.js").StageKey} StageKey */
 /** @typedef {import("../context.js").Tone} Tone */
 /** @typedef {import("../context.js").WorkflowStep} WorkflowStep */
-/** @typedef {import("../state.js").State} State */
 /** @typedef {"zoom_in" | "zoom_out" | "scroll_left" | "scroll_right"} ViewAction */
 
 /**
@@ -35,22 +38,18 @@ export function updateWorkflowStepper(app, targetStage) {
   const { els, state } = app;
   const steps = [
     { key: "import", el: els.stepImport, complete: !!state.file },
-    { key: "qc", el: els.stepQc, complete: !!state.previewSeries?.length },
-    { key: "run", el: els.stepRun, complete: !!state.muDistimes?.length },
-    { key: "edit", el: els.stepEdit, complete: !!state.edit.distimes?.length },
+    { key: "qc", el: els.stepQc, complete: !!state.gridSeries?.length },
+    { key: "run", el: els.stepRun, complete: !!state.runResultToken },
+    {
+      key: "edit",
+      el: els.stepEdit,
+      complete: !!state.edit.spikeTimes.length,
+    },
   ];
-  /** @type {Record<WorkflowStep, WorkflowStep>} */
-  const activeKeyByStage = {
-    import: "import",
-    qc: "qc",
-    run: "run",
-    edit: "edit",
-  };
-  const activeKey = activeKeyByStage[targetStage] || "qc";
   steps.forEach((step) => {
     if (!step.el) return;
     step.el.classList.remove("active", "complete", "pending");
-    if (step.key === activeKey) {
+    if (step.key === targetStage) {
       step.el.classList.add("active");
     } else if (step.complete) {
       step.el.classList.add("complete");
@@ -58,33 +57,71 @@ export function updateWorkflowStepper(app, targetStage) {
       step.el.classList.add("pending");
     }
   });
+  positionStepIndicator(els);
 }
 
 /**
- * @param {App} app
- * @param {{ keepLandingVisible?: boolean }} [options]
+ * Place the sliding pill behind the active workflow chip. Called on stage
+ * changes and on resizes so the pill follows the chips' current geometry.
+ *
+ * @param {Els} els
  */
-export function showWorkspace(app, options = {}) {
-  const { els, state } = app;
-  const { keepLandingVisible = false } = options;
-  if (els.landing && !keepLandingVisible) els.landing.classList.add("hidden");
-  if (els.workspace) els.workspace.classList.remove("hidden");
-  app.setSettingsOpen(false);
-  app.switchStage(state.currentStage || "qc");
-  app.populateGridTabs();
+export function positionStepIndicator(els) {
+  const stepper = els.stepImport?.closest(".workflow-stepper");
+  const indicator = stepper?.querySelector(".step-indicator");
+  if (!stepper || !(indicator instanceof HTMLElement)) return;
+  const active = stepper.querySelector(".step-chip.active");
+  if (!(active instanceof HTMLElement)) {
+    indicator.classList.remove("ready");
+    return;
+  }
+  indicator.classList.add("ready");
+  indicator.style.left = `${active.offsetLeft}px`;
+  indicator.style.top = `${active.offsetTop}px`;
+  indicator.style.width = `${active.offsetWidth}px`;
+  indicator.style.height = `${active.offsetHeight}px`;
+}
+
+/**
+ * Leave the landing page for `target`'s page. The page draws at the next
+ * frame; the landing goes in that frame, after it, so nothing blank shows.
+ *
+ * @param {App} app
+ * @param {StageKey} target
+ */
+export function showWorkspace(app, target) {
+  const { els } = app;
+  if (els.workspace) els.workspace.hidden = false;
+  app.switchStage(target);
+  window.requestAnimationFrame(() => {
+    if (els.landing) els.landing.hidden = true;
+  });
+}
+
+/**
+ * Go back to the landing page.
+ *
+ * @param {App} app
+ */
+export function showLanding(app) {
+  const { els } = app;
+  if (els.landing) els.landing.hidden = false;
+  if (els.workspace) els.workspace.hidden = true;
+  app.updateWorkflowStepper("import");
 }
 
 /** @param {App} app */
 export function updateStepAvailability(app) {
   const { els, state } = app;
   const hasFile = !!state.file;
-  const hasPreview = !!state.previewSeries?.length;
-  const hasRunResults = !!state.muDistimes?.length;
-  const hasEditData = !!state.edit.distimes?.length;
+  const hasPreview = !!state.gridSeries?.length;
+  const hasRunResults = !!state.runResultToken;
+  const hasEditData = !!state.edit.spikeTimes.length;
 
   if (els.stepRun) {
-    // Run becomes available once a preview exists, independent of active stage.
-    els.stepRun.disabled = !hasFile || !hasPreview;
+    // The run page only has something to show once a run has started; the QC
+    // page's Decompose signal is what starts one.
+    els.stepRun.disabled = !hasFile || !hasPreview || !state.runLive;
   }
   if (els.stepEdit) {
     // Edit is available when edit data is loaded, or after a full run.
@@ -108,54 +145,12 @@ export function populateGridTabs(app) {
 }
 
 /**
- * @param {State} state
- * @param {StageKey} stage
- * @returns {{ view: Span | null, total: number }}
- */
-export function getViewForStage(state, stage) {
-  if (stage === "edit") {
-    const pulse = state.edit.pulseTrains?.[state.edit.currentMu] || [];
-    if (!state.edit.view && pulse.length) {
-      setEditView(state, { start: 0, end: pulse.length });
-    }
-    return { view: state.edit.view, total: pulse.length };
-  }
-  if (stage === "run") {
-    const pulse = state.muPulseTrains?.[state.currentMu] || [];
-    if (!state.runView && pulse.length) {
-      setRunView(state, { start: 0, end: pulse.length });
-    }
-    return { view: state.runView, total: pulse.length };
-  }
-  return { view: null, total: 0 };
-}
-
-/**
- * @param {App} app
- * @param {StageKey} stage
- * @param {Span | null} view
- */
-export function setViewForStage(app, stage, view) {
-  const { state } = app;
-  if (stage === "edit") {
-    setEditView(state, view);
-    app.renderEditExplorer();
-    return;
-  }
-  if (stage === "run") {
-    setRunView(state, view);
-    app.renderMuExplorer();
-  }
-}
-
-/**
- * @param {Span | null} view
+ * @param {Span} view
  * @param {number} total
  * @param {ViewAction} action
- * @returns {Span | null}
+ * @returns {Span}
  */
-export function adjustView(view, total, action) {
-  if (!view || total <= 0) return view;
+function adjustView(view, total, action) {
   const span = Math.max(1, view.end - view.start);
   const center = view.start + span / 2;
   let nextSpan = span;
@@ -181,154 +176,56 @@ export function adjustView(view, total, action) {
     nextEnd = Math.round(center + nextSpan / 2);
   }
 
-  if (nextStart < 0) {
-    nextEnd -= nextStart;
-    nextStart = 0;
-  }
-  if (nextEnd > total) {
-    const overflow = nextEnd - total;
-    nextStart = Math.max(0, nextStart - overflow);
-    nextEnd = total;
-  }
-  if (nextEnd <= nextStart) {
-    nextEnd = Math.min(total, nextStart + 1);
-  }
-  return { start: nextStart, end: nextEnd };
+  const next = clampView(nextStart, nextEnd - nextStart, total);
+  if (next.end <= next.start) next.end = Math.min(total, next.start + 1);
+  return next;
 }
 
 /**
  * @param {App} app
  * @param {"prev" | "next"} direction
- * @param {StageKey} stage
  */
-export function goToMu(app, direction, stage) {
+function goToMu(app, direction) {
   const { state } = app;
-  if (stage === "edit") {
-    const gridIdx = state.edit.currentMuGrid || 0;
-    const mus = app.getEditMuIndices(gridIdx);
-    if (!mus.length) return;
-    const current = state.edit.currentMu ?? mus[0];
-    const idx = mus.indexOf(current);
-    const offset = direction === "prev" ? -1 : 1;
-    const next = mus[(idx + offset + mus.length) % mus.length];
-    setEditCurrentMu(state, next, { resetView: true });
-    app.renderEditExplorer();
-  } else if (stage === "run") {
-    const gridIdx = state.currentMuGrid || 0;
-    const mus = app.getMuIndicesForGrid(gridIdx);
-    if (!mus.length) return;
-    const current = state.currentMu ?? mus[0];
-    const idx = mus.indexOf(current);
-    const next =
-      mus[(idx + (direction === "prev" ? -1 : 1) + mus.length) % mus.length];
-    setRunCurrentMu(state, next, { resetView: true });
-    app.renderMuExplorer();
-  }
+  const mus = getEditMuIndicesForGrid(state, state.edit.currentGrid);
+  if (!mus.length) return;
+  const idx = mus.indexOf(state.edit.currentMu);
+  const offset = direction === "prev" ? -1 : 1;
+  setEditCurrentMu(state, mus[(idx + offset + mus.length) % mus.length], {
+    resetView: true,
+  });
+  app.renderEditExplorer();
 }
 
 /**
+ * The edit page's view keys: arrows zoom and scroll, `<` and `>` step
+ * through the grid's MUs.
+ *
  * @param {App} app
  * @param {KeyboardEvent} e
  */
 export function handleKeyboardNavigation(app, e) {
-  const {
-    state,
-    els,
-    setEditMode,
-    runEditAction,
-    removeOutliers,
-    updateMuFilter,
-    applyLabeledToggle,
-  } = app;
-
-  const active = document.activeElement;
-  if (active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName))
+  const { state } = app;
+  if (e.key === "<" || e.key === ">") {
+    goToMu(app, e.key === "<" ? "prev" : "next");
+    e.preventDefault();
     return;
-  const stage = state.currentStage;
-  if (stage !== "run" && stage !== "edit") return;
-
-  /** @type {ViewAction | null} */
-  let action = null;
-  if (stage === "edit") {
-    const key = e.key.toLowerCase();
-    if (key === "a") {
-      setEditMode("add", "Drag a box on pulse train to add spikes");
-      e.preventDefault();
-      return;
-    } else if (key === "r") {
-      void runEditAction(els.editOutliersBtn, () => removeOutliers());
-      e.preventDefault();
-      return;
-    } else if (key === " ") {
-      void runEditAction(els.editUpdateBtn, updateMuFilter);
-      e.preventDefault();
-      return;
-    } else if (key === "d") {
-      setEditMode(
-        "delete_spikes",
-        "Drag a box on pulse train to delete spikes",
-      );
-      e.preventDefault();
-      return;
-    } else if (key === "x") {
-      setEditMode(
-        "add_artifact",
-        "Drag a box on pulse train to mark an artifact",
-      );
-      e.preventDefault();
-      return;
-    } else if (e.key === "<") {
-      goToMu(app, "prev", "edit");
-      e.preventDefault();
-      return;
-    } else if (e.key === ">") {
-      goToMu(app, "next", "edit");
-      e.preventDefault();
-      return;
-    } else if (key === "p") {
-      if (els.editPeelOffToggle) {
-        applyLabeledToggle(
-          els.editPeelOffToggle,
-          els.editPeelOffToggle.dataset.state !== "on",
-          {
-            shortSel: ".peeloff-short",
-            fullSel: ".peeloff-full",
-            prefix: "Peel-off",
-          },
-        );
-      }
-      e.preventDefault();
-      return;
-    } else if (key === "l") {
-      if (els.editLockSpikesToggle) {
-        applyLabeledToggle(
-          els.editLockSpikesToggle,
-          els.editLockSpikesToggle.dataset.state !== "on",
-          {
-            shortSel: ".lockspikes-short",
-            fullSel: ".lockspikes-full",
-            prefix: "Lock",
-          },
-        );
-      }
-      e.preventDefault();
-      return;
-    }
   }
 
-  if (e.key === "ArrowUp") action = "zoom_in";
-  if (e.key === "ArrowDown") action = "zoom_out";
-  if (e.key === "ArrowLeft") action = "scroll_left";
-  if (e.key === "ArrowRight") action = "scroll_right";
+  /** @type {Record<string, ViewAction>} */
+  const actions = {
+    ArrowUp: "zoom_in",
+    ArrowDown: "zoom_out",
+    ArrowLeft: "scroll_left",
+    ArrowRight: "scroll_right",
+  };
+  const action = actions[e.key];
   if (!action) return;
+  if (action === "zoom_out") setEditShowBookmark(state, true);
 
-  if (stage === "edit" && action === "zoom_out") {
-    setShowBookmark(state, true);
-  }
-
-  const { view, total } = getViewForStage(state, stage);
-  if (!view || !total) return;
-  const next = adjustView(view, total, action);
-  setViewForStage(app, stage, next);
+  const total = state.edit.spikeTimes.length ? state.edit.totalSamples : 0;
+  if (!total) return;
+  setEditView(state, adjustView(getEditView(state), total, action));
+  app.renderEditExplorer();
   e.preventDefault();
 }
